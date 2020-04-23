@@ -43,6 +43,6 @@ func printKeyStat() {
 		}, cmder.GetDb())
 	}
 
-	stat := analyzer.ScanAllKeys(cli)
+	stat := analyzer.ScanAllKeys(cli, cmder.GetSeparator())
 	stat.Print()
 }

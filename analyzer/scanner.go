@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/winjeg/redis"
 	"github.com/winjeg/rma4go/cmder"
+	"gopkg.in/cheggaaa/pb.v1"
 )
 
 const (
@@ -17,25 +18,39 @@ const (
 	elementSize = 4
 )
 
-func ScanAllKeys(cli redis.UniversalClient) RedisStat {
+func getTotalKeys(client redis.UniversalClient) int {
+	dbsize, _ := client.DBSize().Result()
+	return int(dbsize)
+}
+
+func ScanAllKeys(cli redis.UniversalClient, sep string) RedisStat {
+	flagSeparator = sep
+
 	supportMemUsage := checkSupportMemUsage(cli)
 	var stat RedisStat
 	scmd := cli.Scan(0, cmder.GetMatch(), scanCount)
 	count := 0
+
+	dbsize := getTotalKeys(cli)
+	bar := pb.StartNew(dbsize)
+
 	if scmd != nil {
 		ks, cursor, err := scmd.Result()
 		if cursor == 0 && len(ks) > 0 {
 			count += len(ks)
+			bar.Add(len(ks))
 			MergeKeyMeta(cli, supportMemUsage, ks, &stat)
 		}
 		for cursor > 0 && err == nil {
 			MergeKeyMeta(cli, supportMemUsage, ks, &stat)
 			count += len(ks)
+			bar.Add(len(ks))
 			scmd = cli.Scan(cursor, cmder.GetMatch(), scanCount)
 			ks, cursor, err = scmd.Result()
 			if cursor == 0 {
 				if len(ks) > 0 {
 					count += len(ks)
+					bar.Add(len(ks))
 					MergeKeyMeta(cli, supportMemUsage, ks, &stat)
 				}
 			}
@@ -50,7 +65,6 @@ func ScanAllKeys(cli redis.UniversalClient) RedisStat {
 	stat.Compact()
 	return stat
 }
-
 
 func MergeKeyMeta(cli redis.UniversalClient, supportMemUsage bool, ks []string, stat *RedisStat) {
 	for i := range ks {
