@@ -42,13 +42,16 @@ var (
 	flagSeparator string = ":"
 )
 
-func getPrefix(key string) string {
+func getPrefix(key string, sub int) string {
 	parts := strings.Split(key, flagSeparator)
-	if len(parts) <= 1 {
+	if len(parts) <= 0 {
 		return key
 	}
+	if len(parts) <= sub {
+		return getPrefix(key, sub-1)
+	}
 
-	return strings.Join(parts[:len(parts)-1], flagSeparator) + flagSeparator + "*"
+	return strings.Join(parts[:len(parts)-sub], flagSeparator) + flagSeparator + "*"
 }
 
 type PrefixItems map[string]*PrefixItem
@@ -97,7 +100,7 @@ func (item PrefixItem) estimatedSize() int64 {
 func formatSize(size int64) string {
 	switch {
 	case size < 1024:
-		return fmt.Sprintf("%d bytes", size)
+		return fmt.Sprintf("%d B", size)
 	case size < 1024*1024:
 		return fmt.Sprintf("%.3g KB", float64(size)/1024)
 	case size < 1024*1024*1024:
@@ -126,10 +129,34 @@ type RedisStat struct {
 	BigKeys KeyStat `json:"bigKeys"`
 }
 
+func sortedSlice(Prefixes map[string]Distribution) []Distribution {
+	// Pull all items out of the map
+	slice := make([]Distribution, len(Prefixes))
+	i := 0
+	for _, item := range Prefixes {
+		slice[i] = item
+		i += 1
+	}
+
+	// Sort by size
+	sort.Slice(slice, func(i, j int) bool {
+		// Sort by "size desc, count desc"
+		if slice[i].estimatedSize() == slice[j].estimatedSize() {
+			return slice[i].KeyCount > slice[j].KeyCount
+		}
+
+		return slice[i].estimatedSize() > slice[j].estimatedSize()
+	})
+
+	return slice
+}
+
 // total stat and distributions
 type KeyStat struct {
 	Distribution map[string]Distribution `json:"distribution"`
 	Prefixes     map[string]Distribution `json:"prefix"`
+	FPrefixes    map[string]Distribution `json:"prefix"`
+	GFPrefixes   map[string]Distribution `json:"prefix"`
 	Metrics
 }
 
@@ -149,6 +176,10 @@ type Metrics struct {
 	ExpireInDay    int64 `json:"expireInDay"`   // >= 1h < 24h
 	ExpireInWeek   int64 `json:"expireInWeek"`  // >= 1d < 7d
 	ExpireOutWeek  int64 `json:"expireOutWeek"` // >= 7d
+}
+
+func (meta Metrics) estimatedSize() int64 {
+	return meta.KeySize + meta.DataSize
 }
 
 func (m *Metrics) MergeMeta(meta KeyMeta) {
@@ -172,8 +203,10 @@ func (m *Metrics) MergeMeta(meta KeyMeta) {
 func (m *Metrics) data() []string {
 	result := make([]string, 0, metricSize)
 	result = append(result, fmt.Sprintf("%d", m.KeyCount))
-	result = append(result, fmt.Sprintf("%d", m.KeySize))
-	result = append(result, fmt.Sprintf("%d", m.DataSize))
+	//result = append(result, fmt.Sprintf("%d", m.KeySize))
+	//result = append(result, fmt.Sprintf("%d", m.DataSize))
+	result = append(result, formatSize(m.KeySize))
+	result = append(result, formatSize(m.DataSize))
 	result = append(result, fmt.Sprintf("%d", m.ExpireInHour))
 	result = append(result, fmt.Sprintf("%d", m.ExpireInDay))
 	result = append(result, fmt.Sprintf("%d", m.ExpireInWeek))
@@ -218,18 +251,32 @@ func (stat *RedisStat) Merge(meta KeyMeta) {
 func (stat *RedisStat) PrintPrefix() {
 	color.Green("\n\nall keys statistics\n\n")
 	stat.All.printPrefixTable()
+	stat.All.printPrefixParentTable()
+	stat.All.printPrefixGParentTable()
 	color.Green("\n\nstring keys statistics\n\n")
 	stat.String.printPrefixTable()
+	stat.String.printPrefixParentTable()
+	stat.String.printPrefixGParentTable()
 	color.Green("\n\nlist keys statistics\n\n")
 	stat.List.printPrefixTable()
+	stat.List.printPrefixParentTable()
+	stat.List.printPrefixGParentTable()
 	color.Green("\n\nhash keys statistics\n\n")
 	stat.Hash.printPrefixTable()
+	stat.Hash.printPrefixParentTable()
+	stat.Hash.printPrefixGParentTable()
 	color.Green("\n\nset keys statistics\n\n")
 	stat.Set.printPrefixTable()
+	stat.Set.printPrefixParentTable()
+	stat.Set.printPrefixGParentTable()
 	color.Green("\n\nzset keys statistics\n\n")
 	stat.ZSet.printPrefixTable()
+	stat.ZSet.printPrefixParentTable()
+	stat.ZSet.printPrefixGParentTable()
 	color.Green("\n\nother keys statistics\n\n")
 	stat.Other.printPrefixTable()
+	stat.Other.printPrefixParentTable()
+	stat.Other.printPrefixGParentTable()
 	color.Green("\n\nbig keys statistics\n\n")
 	stat.BigKeys.printPrefixTable()
 }
@@ -264,7 +311,51 @@ func (ks *KeyStat) printPrefixTable() {
 	table.SetBorders(tablewriter.Border{Left: true, Top: false, Right: true, Bottom: false})
 	table.SetCenterSeparator("|")
 
-	for _, v := range ks.Prefixes {
+	for _, v := range sortedSlice(ks.Prefixes) {
+		table.Append(v.tableData())
+	}
+	footer := make([]string, 0, metricSize+1)
+	footer = append(footer, "total")
+	footer = append(footer, ks.data()...)
+	table.Append(footer)
+	table.Render()
+}
+
+func (ks *KeyStat) printPrefixParentTable() {
+	prefix := sortedSlice(ks.FPrefixes)
+	if len(prefix) == 0 {
+		return
+	}
+
+	table := tablewriter.NewWriter(os.Stdout)
+	table.SetHeader([]string{"fpattern", "key num", "key size", "data size", "expire in hour", "expire in day",
+		"expire in week", "expire out week", "never expire"})
+	table.SetBorders(tablewriter.Border{Left: true, Top: false, Right: true, Bottom: false})
+	table.SetCenterSeparator("|")
+
+	for _, v := range prefix {
+		table.Append(v.tableData())
+	}
+	footer := make([]string, 0, metricSize+1)
+	footer = append(footer, "total")
+	footer = append(footer, ks.data()...)
+	table.Append(footer)
+	table.Render()
+}
+
+func (ks *KeyStat) printPrefixGParentTable() {
+	prefix := sortedSlice(ks.GFPrefixes)
+	if len(prefix) == 0 {
+		return
+	}
+
+	table := tablewriter.NewWriter(os.Stdout)
+	table.SetHeader([]string{"gfpattern", "key num", "key size", "data size", "expire in hour", "expire in day",
+		"expire in week", "expire out week", "never expire"})
+	table.SetBorders(tablewriter.Border{Left: true, Top: false, Right: true, Bottom: false})
+	table.SetCenterSeparator("|")
+
+	for _, v := range prefix {
 		table.Append(v.tableData())
 	}
 	footer := make([]string, 0, metricSize+1)
@@ -315,21 +406,64 @@ func (stat *KeyStat) MergePrefix(meta KeyMeta) {
 		stat.ExpireOutWeek++
 	}
 
-	prefix := getPrefix(meta.Key)
+	prefix := getPrefix(meta.Key, 1)
+	stat.FillPrefix(&stat.Prefixes, prefix, meta)
 
-	if stat.Prefixes == nil {
-		stat.Prefixes = make(map[string]Distribution, defaultSize)
+	fprefix := getPrefix(meta.Key, 2)
+	if strings.Compare(prefix, fprefix) != 0 {
+		stat.FillPrefix(&stat.FPrefixes, fprefix, meta)
+
+		gfprefix := getPrefix(meta.Key, 3)
+		if strings.Compare(gfprefix, fprefix) != 0 {
+			stat.FillPrefix(&stat.GFPrefixes, gfprefix, meta)
+		}
+	}
+	/*
+		prefix := getPrefix(meta.Key)
+
+		if stat.Prefixes == nil {
+			stat.Prefixes = make(map[string]Distribution, defaultSize)
+		}
+
+		if _, ok := stat.Prefixes[prefix]; !ok {
+			stat.Prefixes[prefix] = Distribution{}
+		}
+		c := stat.Prefixes[prefix]
+		c.KeyPattern = prefix
+		c.KeyCount += 1
+		c.KeySize += meta.KeySize
+		c.DataSize += meta.DataSize
+		stat.Prefixes[prefix] = c
+	*/
+}
+
+func (stat *KeyStat) FillPrefix(Prefixes *map[string]Distribution, prefix string, meta KeyMeta) {
+	if *Prefixes == nil {
+		*Prefixes = make(map[string]Distribution, defaultSize)
 	}
 
-	if _, ok := stat.Prefixes[prefix]; !ok {
-		stat.Prefixes[prefix] = Distribution{}
+	if _, ok := (*Prefixes)[prefix]; !ok {
+		(*Prefixes)[prefix] = Distribution{}
 	}
-	c := stat.Prefixes[prefix]
+	c := (*Prefixes)[prefix]
 	c.KeyPattern = prefix
 	c.KeyCount += 1
 	c.KeySize += meta.KeySize
 	c.DataSize += meta.DataSize
-	stat.Prefixes[prefix] = c
+	switch {
+	case meta.Ttl < 0:
+		c.KeyNeverExpire++
+	case meta.Ttl >= 0 && meta.Ttl < Hour:
+		c.ExpireInHour++
+	case meta.Ttl >= Hour && meta.Ttl < Day:
+		c.ExpireInDay++
+	case meta.Ttl >= Day && meta.Ttl < Week:
+		c.ExpireInWeek++
+	case meta.Ttl >= Week:
+		c.ExpireOutWeek++
+	}
+
+	(*Prefixes)[prefix] = c
 }
 
 func (stat *KeyStat) Merge(meta KeyMeta) {
