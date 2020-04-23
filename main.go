@@ -1,10 +1,10 @@
 package main
 
 import (
+	"github.com/nullcore1024/rma4go/analyzer"
+	"github.com/nullcore1024/rma4go/client"
+	"github.com/nullcore1024/rma4go/cmder"
 	"github.com/winjeg/redis"
-	"github.com/winjeg/rma4go/analyzer"
-	"github.com/winjeg/rma4go/client"
-	"github.com/winjeg/rma4go/cmder"
 
 	"flag"
 	// _ "net/http/pprof"
@@ -43,6 +43,6 @@ func printKeyStat() {
 		}, cmder.GetDb())
 	}
 
-	stat := analyzer.ScanAllKeys(cli, cmder.GetSeparator())
+	stat := analyzer.ScanAllKeys(cli, cmder.GetSeparator(), cmder.GetTree(), cmder.GetPrefix())
 	stat.Print()
 }

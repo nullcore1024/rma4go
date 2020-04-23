@@ -12,6 +12,8 @@ var (
 	auth          string
 	db            int
 	help          bool
+	prefix        bool
+	tree          bool
 	cluster       string
 	match         string
 	flagSeparator string
@@ -19,6 +21,8 @@ var (
 
 func init() {
 	flag.BoolVar(&help, "h", false, "help content")
+	flag.BoolVar(&prefix, "pp", false, "build prefix stat")
+	flag.BoolVar(&tree, "t", false, "build tree stat")
 	flag.StringVar(&host, "H", "localhost", "address of a redis")
 	flag.StringVar(&host, "r", "localhost", "address of a redis")
 	flag.IntVar(&port, "p", 6379, "port of the redis")
@@ -63,4 +67,12 @@ func GetMatch() string {
 
 func GetSeparator() string {
 	return flagSeparator
+}
+
+func GetPrefix() bool {
+	return prefix
+}
+
+func GetTree() bool {
+	return tree
 }

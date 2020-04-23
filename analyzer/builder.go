@@ -2,9 +2,12 @@
 package analyzer
 
 import (
+	"encoding/json"
 	"fmt"
 	"github.com/fatih/color"
+	"github.com/nullcore1024/rma4go/treeprint"
 	"github.com/olekukonko/tablewriter"
+	"io/ioutil"
 	"os"
 	"sort"
 	"strings"
@@ -40,6 +43,8 @@ const (
 
 var (
 	flagSeparator string = ":"
+	buildPrefix   bool   = false
+	buildTree     bool   = false
 )
 
 func getPrefix(key string, sub int) string {
@@ -51,7 +56,8 @@ func getPrefix(key string, sub int) string {
 		return getPrefix(key, sub-1)
 	}
 
-	return strings.Join(parts[:len(parts)-sub], flagSeparator) + flagSeparator + "*"
+	token := []string{"*", "*", "*", "*", "*"}
+	return strings.Join(parts[:len(parts)-sub], flagSeparator) + flagSeparator + strings.Join(token[:sub], flagSeparator)
 }
 
 type PrefixItems map[string]*PrefixItem
@@ -157,6 +163,7 @@ type KeyStat struct {
 	Prefixes     map[string]Distribution `json:"prefix"`
 	FPrefixes    map[string]Distribution `json:"prefix"`
 	GFPrefixes   map[string]Distribution `json:"prefix"`
+	Tree         treeprint.Tree
 	Metrics
 }
 
@@ -168,14 +175,14 @@ type Distribution struct {
 
 // basic metrics of a group of key
 type Metrics struct {
-	KeyCount       int64 `json:"keyCount"`
-	KeySize        int64 `json:"keySize"`
-	DataSize       int64 `json:"dataSize"`
-	KeyNeverExpire int64 `json:"neverExpire"`
-	ExpireInHour   int64 `json:"expireInHour"`  // >= 0h < 1h
-	ExpireInDay    int64 `json:"expireInDay"`   // >= 1h < 24h
-	ExpireInWeek   int64 `json:"expireInWeek"`  // >= 1d < 7d
-	ExpireOutWeek  int64 `json:"expireOutWeek"` // >= 7d
+	KeyCount       int64 `json:"keyCount" tree:"keyCount"`
+	KeySize        int64 `json:"keySize tree:"keySz""`
+	DataSize       int64 `json:"dataSize" tree:"dataSz"`
+	KeyNeverExpire int64 `json:"NExpire"`
+	ExpireInHour   int64 `json:"-"` // >= 0h < 1h
+	ExpireInDay    int64 `json:"-"` // >= 1h < 24h
+	ExpireInWeek   int64 `json:"-"` // >= 1d < 7d
+	ExpireOutWeek  int64 `json:"-"` // >= 7d
 }
 
 func (meta Metrics) estimatedSize() int64 {
@@ -248,6 +255,17 @@ func (stat *RedisStat) Merge(meta KeyMeta) {
 	}
 }
 
+func (stat *RedisStat) PrintTree() {
+	stat.All.printTree("all.json")
+	stat.String.printTree("string.json")
+	stat.List.printTree("list.json")
+	stat.Hash.printTree("hash.json")
+	stat.Set.printTree("set.json")
+	stat.ZSet.printTree("zset.json")
+	stat.Other.printTree("other.json")
+	stat.BigKeys.printTree("bigokey.json")
+}
+
 func (stat *RedisStat) PrintPrefix() {
 	color.Green("\n\nall keys statistics\n\n")
 	stat.All.printPrefixTable()
@@ -301,7 +319,63 @@ func (stat *RedisStat) Print() {
 	stat.BigKeys.printTable()
 
 	color.Green("\n\n==================abcpreifx===================\n\n")
-	stat.PrintPrefix()
+	if buildPrefix {
+		stat.PrintPrefix()
+	}
+	stat.PrintTree()
+}
+
+type treeNode struct {
+	Meta  Metrics    `json:"Meta"`
+	Value string     `json:"N"`
+	Nodes []treeNode `json:"SN"`
+}
+
+func (items treeNode) sortedSlice() []treeNode {
+	// Pull all items out of the map
+	slice := make([]treeNode, len(items.Nodes))
+	i := 0
+	for _, item := range items.Nodes {
+		slice[i] = item
+		i += 1
+	}
+	// Sort by size
+	sort.Slice(slice, func(i, j int) bool {
+		// Sort by "size desc, count desc"
+		if slice[i].Meta.estimatedSize() == slice[j].Meta.estimatedSize() {
+			return slice[i].Meta.KeyCount > slice[j].Meta.KeyCount
+		}
+
+		return slice[i].Meta.estimatedSize() > slice[j].Meta.estimatedSize()
+	})
+
+	return slice
+}
+
+func rebuildTreeName(tree *treeNode) {
+	if tree.Nodes == nil {
+		return
+	}
+	tree.Nodes = tree.sortedSlice()
+	tree.Value = fmt.Sprintf("%s_%s", tree.Value, formatSize(tree.Meta.estimatedSize()))
+	for i, _ := range tree.Nodes {
+		if tree.Nodes[i].Nodes != nil {
+			tree.Nodes[i].Nodes = tree.Nodes[i].sortedSlice()
+			rebuildTreeName(&tree.Nodes[i])
+		}
+	}
+	return
+}
+
+func (ks *KeyStat) printTree(file string) {
+	if ks.Tree != nil {
+		tree := treeNode{}
+		json.Unmarshal([]byte(ks.Tree.JsonString()), &tree)
+		rebuildTreeName(&tree)
+		if dump, err := json.Marshal(tree); err == nil {
+			ioutil.WriteFile(file, []byte(dump), 0755)
+		}
+	}
 }
 
 func (ks *KeyStat) printPrefixTable() {
@@ -389,6 +463,54 @@ func (dist *Distribution) tableData() []string {
 	return result
 }
 
+func (stat *KeyStat) MergeTree(meta KeyMeta) {
+	stat.DataSize += meta.DataSize
+	stat.KeySize += meta.KeySize
+	stat.KeyCount++
+	switch {
+	case meta.Ttl < 0:
+		stat.KeyNeverExpire++
+	case meta.Ttl >= 0 && meta.Ttl < Hour:
+		stat.ExpireInHour++
+	case meta.Ttl >= Hour && meta.Ttl < Day:
+		stat.ExpireInDay++
+	case meta.Ttl >= Day && meta.Ttl < Week:
+		stat.ExpireInWeek++
+	case meta.Ttl >= Week:
+		stat.ExpireOutWeek++
+	}
+
+	prefix := getPrefix(meta.Key, 1)
+	token := strings.Split(prefix, flagSeparator)
+
+	if stat.Tree == nil {
+		stat.Tree = treeprint.New()
+	}
+	var root treeprint.Tree = stat.Tree
+
+	for i, v := range token {
+		find := root.FindByValue(v)
+		if find == nil {
+			if i == len(token)-1 {
+				m := &Metrics{}
+				m.MergeMeta(meta)
+				root.AddMetaNode(m, v)
+			} else {
+				m := &Metrics{}
+				m.MergeMeta(meta)
+				root = root.AddMetaBranch(m, v)
+			}
+		} else {
+			root = find
+			val := find.GetMetaValue()
+			if m, ok := val.(*Metrics); ok {
+				m.MergeMeta(meta)
+				find.SetMetaValue(m)
+			}
+		}
+	}
+}
+
 func (stat *KeyStat) MergePrefix(meta KeyMeta) {
 	stat.DataSize += meta.DataSize
 	stat.KeySize += meta.KeySize
@@ -413,7 +535,20 @@ func (stat *KeyStat) MergePrefix(meta KeyMeta) {
 	if strings.Compare(prefix, fprefix) != 0 {
 		stat.FillPrefix(&stat.FPrefixes, fprefix, meta)
 
-		gfprefix := getPrefix(meta.Key, 3)
+		gfprefix := getPrefix(meta.Key, 4)
+		find := false
+
+		for k, _ := range stat.GFPrefixes {
+			if strings.HasPrefix(gfprefix, k) {
+				find = true
+				gfprefix = k
+			}
+		}
+
+		if !find {
+			gfprefix = getPrefix(meta.Key, 3)
+		}
+
 		if strings.Compare(gfprefix, fprefix) != 0 {
 			stat.FillPrefix(&stat.GFPrefixes, gfprefix, meta)
 		}
@@ -468,7 +603,12 @@ func (stat *KeyStat) FillPrefix(Prefixes *map[string]Distribution, prefix string
 
 func (stat *KeyStat) Merge(meta KeyMeta) {
 	stat.MergeMeta(meta)
-	stat.MergePrefix(meta)
+	if buildPrefix {
+		stat.MergePrefix(meta)
+	}
+	if buildTree {
+		stat.MergeTree(meta)
+	}
 
 	dists := stat.Distribution
 	if dists == nil {

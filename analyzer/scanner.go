@@ -3,9 +3,9 @@ package analyzer
 
 import (
 	"fmt"
+	"github.com/nullcore1024/rma4go/cmder"
 	"github.com/winjeg/redis"
-	"github.com/winjeg/rma4go/cmder"
-	"gopkg.in/cheggaaa/pb.v1"
+	_ "gopkg.in/cheggaaa/pb.v1"
 )
 
 const (
@@ -23,8 +23,10 @@ func getTotalKeys(client redis.UniversalClient) int {
 	return int(dbsize)
 }
 
-func ScanAllKeys(cli redis.UniversalClient, sep string) RedisStat {
+func ScanAllKeys(cli redis.UniversalClient, sep string, tree, pre bool) RedisStat {
 	flagSeparator = sep
+	buildPrefix = pre
+	buildTree = tree
 
 	supportMemUsage := checkSupportMemUsage(cli)
 	var stat RedisStat
@@ -32,25 +34,24 @@ func ScanAllKeys(cli redis.UniversalClient, sep string) RedisStat {
 	count := 0
 
 	dbsize := getTotalKeys(cli)
-	bar := pb.StartNew(dbsize)
+	fmt.Printf("start total count:%d, dbsize:%d", count, dbsize)
+	//bar := pb.StartNew(dbsize)
 
 	if scmd != nil {
 		ks, cursor, err := scmd.Result()
 		if cursor == 0 && len(ks) > 0 {
 			count += len(ks)
-			bar.Add(len(ks))
 			MergeKeyMeta(cli, supportMemUsage, ks, &stat)
 		}
 		for cursor > 0 && err == nil {
 			MergeKeyMeta(cli, supportMemUsage, ks, &stat)
 			count += len(ks)
-			bar.Add(len(ks))
 			scmd = cli.Scan(cursor, cmder.GetMatch(), scanCount)
 			ks, cursor, err = scmd.Result()
 			if cursor == 0 {
 				if len(ks) > 0 {
 					count += len(ks)
-					bar.Add(len(ks))
+					//bar.Add(len(ks))
 					MergeKeyMeta(cli, supportMemUsage, ks, &stat)
 				}
 			}
@@ -61,7 +62,7 @@ func ScanAllKeys(cli redis.UniversalClient, sep string) RedisStat {
 			}
 		}
 	}
-	fmt.Println("total count", count)
+	fmt.Printf("total count:%d, dbsize:%d", count, dbsize)
 	stat.Compact()
 	return stat
 }
