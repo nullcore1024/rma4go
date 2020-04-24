@@ -2,14 +2,16 @@
 package analyzer
 
 import (
+	"context"
 	"fmt"
 	"github.com/nullcore1024/rma4go/cmder"
 	"github.com/winjeg/redis"
 	_ "gopkg.in/cheggaaa/pb.v1"
+	"sync"
 )
 
 const (
-	scanCount   = 512
+	scanCount   = 1024
 	compactSize = 10240
 
 	// cause the real memory used by redis is a little bigger than the content
@@ -23,11 +25,194 @@ func getTotalKeys(client redis.UniversalClient) int {
 	return int(dbsize)
 }
 
-func ScanAllKeys(cli redis.UniversalClient, sep string, tree, pre, compact bool) RedisStat {
+func Run(clis []redis.UniversalClient, sep string, tree, pre, compact bool) RedisStat {
 	flagSeparator = sep
 	buildPrefix = pre
 	buildTree = tree
 
+	wg := &sync.WaitGroup{}
+
+	poolSize := len(clis)
+
+	var stat RedisStat
+
+	cli := clis[poolSize-1]
+	dbsize := getTotalKeys(cli)
+
+	keyChan := make(chan string, 4096)
+	emit := make(chan KeyMeta, 4096)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	wg.Add(1)
+	go ProducerKey(cli, dbsize, keyChan, wg)
+	wg.Add(1)
+	go ConsumerChanMeta(emit, dbsize, ctx, cancel, &stat, wg)
+	go PipeDo(clis, poolSize-1, dbsize, keyChan, emit, ctx, wg)
+	fmt.Printf("dbsize:%d\n", dbsize)
+
+	wg.Wait()
+	return stat
+}
+
+func PipeDo(clis []redis.UniversalClient, poolSize, dbsize int, recv chan string, sender chan KeyMeta, ctx context.Context, wg *sync.WaitGroup) {
+	supportMemUsage := checkSupportMemUsage(clis[0])
+	limiter := make(chan bool, poolSize)
+
+	i := 0
+	for {
+		select {
+		case key := <-recv:
+			{
+				if i == dbsize {
+					fmt.Printf("finish key:%d\n", i)
+					break
+				}
+
+				wg.Add(1)
+				limiter <- true
+
+				go BatchScanKeys(clis[i%poolSize], supportMemUsage, key, limiter, wg, sender)
+				i++
+			}
+		case <-ctx.Done():
+			fmt.Printf("finish consumer key:%d\n", i)
+			return
+		}
+	}
+}
+
+func ProducerKey(cli redis.UniversalClient, dbsize int, keyChan chan string, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	var (
+		ks     []string
+		err    error
+		count  int
+		cursor uint64 = 0
+	)
+	fmt.Printf("start total count:%d, dbsize:%d\n", count, dbsize)
+	//bar := pb.StartNew(dbsize)
+
+	for {
+		scmd := cli.Scan(cursor, cmder.GetMatch(), scanCount)
+		ks, cursor, err = scmd.Result()
+		if len(ks) > 0 {
+			count += len(ks)
+			for i := range ks {
+				keyChan <- ks[i]
+			}
+		}
+		if cursor == 0 || err != nil {
+			fmt.Printf("cursor:%d current size:%d, err:%s\n", count, err)
+			break
+		}
+	}
+}
+
+func ConsumerChanMeta(ch chan KeyMeta, dbsize int, ctx context.Context, cancel func(), stat *RedisStat, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	batch := dbsize / 10
+	prev := 0
+	count := 0
+	for {
+		select {
+		case meta := <-ch:
+			{
+				count++
+				stat.Merge(meta)
+				if count-prev > batch {
+					prev = count
+					fmt.Printf("current consumer:%d\n", count)
+				}
+
+				if count == dbsize {
+					fmt.Printf("finish consumer:%d\n", count)
+					cancel()
+					continue
+				}
+			}
+		case <-ctx.Done():
+			{
+				fmt.Println("notify close", count)
+				return
+			}
+		}
+	}
+}
+
+func BatchScanKeys(cli redis.UniversalClient, supportMemUsage bool, key string, limiter chan bool, wg *sync.WaitGroup, emit chan KeyMeta) {
+	defer wg.Done()
+	GetKeysMeta(cli, supportMemUsage, key, emit)
+	<-limiter
+	return
+}
+
+func GetKeysMeta(cli redis.UniversalClient, supportMemUsage bool, key string, emit chan KeyMeta) int {
+	//for i := range keys {
+	meta := GetKeyMeta(cli, supportMemUsage, key)
+	emit <- meta
+	return 0
+}
+
+func GetKeyMeta(cli redis.UniversalClient, supportMemUsage bool, key string) KeyMeta {
+	var meta KeyMeta
+	meta.Key = key
+	meta.KeySize = int64(len(key))
+	ttl, err := cli.PTTL(key).Result()
+	if err != nil {
+		ttl = -1000000
+	}
+	meta.Ttl = int64(ttl)
+	t, e := cli.Type(key).Result()
+	if e != nil {
+		return meta
+	}
+	if supportMemUsage {
+		meta.DataSize = getLenByMemUsage(cli, key)
+	}
+	switch t {
+	case typeString:
+		meta.Type = typeString
+		if !supportMemUsage {
+			sl, err := cli.StrLen(key).Result()
+			if err != nil {
+				sl = 0
+			}
+			meta.DataSize = sl + baseSize
+		}
+	case typeList:
+		meta.Type = typeList
+		if !supportMemUsage {
+			meta.DataSize = getListLen(key, cli)
+		}
+	case typeHash:
+		meta.Type = typeHash
+		if !supportMemUsage {
+			meta.DataSize = getLen(key, cli, typeHash)
+		}
+	case typeSet:
+		meta.Type = typeSet
+		if !supportMemUsage {
+			meta.DataSize = getLen(key, cli, typeSet)
+		}
+	case typeZSet:
+		meta.Type = typeZSet
+		if !supportMemUsage {
+			meta.DataSize = getLen(key, cli, typeZSet)
+		}
+	default:
+		meta.Type = typeOther
+		s, err := cli.Dump(key).Result()
+		if err != nil {
+			meta.DataSize = 0
+		}
+		meta.DataSize = int64(len(s))
+	}
+	return meta
+}
+
+func ScanAllKeys(cli redis.UniversalClient, sep string, tree, pre, compact bool) RedisStat {
 	supportMemUsage := checkSupportMemUsage(cli)
 	var stat RedisStat
 	scmd := cli.Scan(0, cmder.GetMatch(), scanCount)

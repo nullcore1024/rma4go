@@ -10,6 +10,7 @@ var (
 	host          string
 	port          int
 	auth          string
+	thread        int
 	db            int
 	compact       bool
 	help          bool
@@ -32,6 +33,7 @@ func init() {
 	flag.StringVar(&flagSeparator, "s", ":", "separator semi, default :")
 	flag.StringVar(&match, "m", "*", "match the pattern to scan, like 'a*'")
 	flag.IntVar(&db, "d", 0, "db of the redis to analyze")
+	flag.IntVar(&thread, "w", 8, "worker thread num")
 	flag.StringVar(&cluster, "c", "", "cluster info separated by comma, like localhost:123,localhost:456")
 
 	flag.Usage = usage
@@ -81,4 +83,8 @@ func GetTree() bool {
 
 func GetCompact() bool {
 	return compact
+}
+
+func GetThread() int {
+	return thread
 }
