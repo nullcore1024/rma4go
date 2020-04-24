@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	scanCount   = 256
+	scanCount   = 512
 	compactSize = 10240
 
 	// cause the real memory used by redis is a little bigger than the content
@@ -23,7 +23,7 @@ func getTotalKeys(client redis.UniversalClient) int {
 	return int(dbsize)
 }
 
-func ScanAllKeys(cli redis.UniversalClient, sep string, tree, pre bool) RedisStat {
+func ScanAllKeys(cli redis.UniversalClient, sep string, tree, pre, compact bool) RedisStat {
 	flagSeparator = sep
 	buildPrefix = pre
 	buildTree = tree
@@ -34,7 +34,8 @@ func ScanAllKeys(cli redis.UniversalClient, sep string, tree, pre bool) RedisSta
 	count := 0
 
 	dbsize := getTotalKeys(cli)
-	fmt.Printf("start total count:%d, dbsize:%d", count, dbsize)
+	batch := dbsize / 10
+	fmt.Printf("start total count:%d, dbsize:%d\n", count, dbsize)
 	//bar := pb.StartNew(dbsize)
 
 	if scmd != nil {
@@ -55,15 +56,24 @@ func ScanAllKeys(cli redis.UniversalClient, sep string, tree, pre bool) RedisSta
 					MergeKeyMeta(cli, supportMemUsage, ks, &stat)
 				}
 			}
+			if count%batch == 0 {
+				fmt.Printf("current count:%d, dbsize:%d\n", count, dbsize)
+			}
+			if err != nil {
+				fmt.Printf("cursor:%d current size:%d, err:%s\n", count, err)
+				break
+			}
 			// compact for every 40k keys
-			if len(stat.All.Distribution) > compactSize {
+			if compact && (len(stat.All.Distribution) > compactSize) {
 				fmt.Printf("compacting...   current size:%d\n", count)
 				stat.Compact()
 			}
 		}
 	}
-	fmt.Printf("total count:%d, dbsize:%d", count, dbsize)
-	stat.Compact()
+	fmt.Printf("scan count:%d, dbsize:%d", count, dbsize)
+	if compact {
+		stat.Compact()
+	}
 	return stat
 }
 

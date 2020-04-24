@@ -11,6 +11,7 @@ var (
 	port          int
 	auth          string
 	db            int
+	compact       bool
 	help          bool
 	prefix        bool
 	tree          bool
@@ -22,6 +23,7 @@ var (
 func init() {
 	flag.BoolVar(&help, "h", false, "help content")
 	flag.BoolVar(&prefix, "pp", false, "build prefix stat")
+	flag.BoolVar(&compact, "z", false, "compact key")
 	flag.BoolVar(&tree, "t", false, "build tree stat")
 	flag.StringVar(&host, "H", "localhost", "address of a redis")
 	flag.StringVar(&host, "r", "localhost", "address of a redis")
@@ -75,4 +77,8 @@ func GetPrefix() bool {
 
 func GetTree() bool {
 	return tree
+}
+
+func GetCompact() bool {
+	return compact
 }

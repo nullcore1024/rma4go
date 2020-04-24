@@ -580,24 +580,39 @@ func (stat *KeyStat) Merge(meta KeyMeta) {
 	if dists == nil {
 		dists = make(map[string]Distribution, defaultSize)
 	}
-	keyLen := len(meta.Key)
 
-	// check for if there are already some key in the collection
-	inMap := false
-	for i := 0; i < keyLen; i++ {
-		x := meta.Key[0 : i+1]
-		if v, ok := dists[x]; ok {
+	if token := strings.Split(meta.Key, flagSeparator); len(token) > 1 {
+		prefix := getPrefix(meta.Key, 1)
+		if v, ok := dists[prefix]; ok {
 			d := Distribution(v)
 			d.MergeMeta(meta)
-			dists[x] = d
-			inMap = true
+			dists[prefix] = d
+		} else {
+			var d Distribution
+			d.MergeMeta(meta)
+			d.KeyPattern = prefix
+			dists[prefix] = d
 		}
-	}
-	//
-	if !inMap {
-		var d Distribution
-		d.MergeMeta(meta)
-		dists[meta.Key] = d
+	} else {
+		keyLen := len(meta.Key)
+
+		// check for if there are already some key in the collection
+		inMap := false
+		for i := 0; i < keyLen; i++ {
+			x := meta.Key[0 : i+1]
+			if v, ok := dists[x]; ok {
+				d := Distribution(v)
+				d.MergeMeta(meta)
+				dists[x] = d
+				inMap = true
+			}
+		}
+		//
+		if !inMap {
+			var d Distribution
+			d.MergeMeta(meta)
+			dists[meta.Key] = d
+		}
 	}
 
 	stat.Distribution = dists
@@ -659,7 +674,11 @@ func (stat *KeyStat) compact() {
 			var nd Distribution
 			for _, dk := range v {
 				d := distMap[dk]
-				nd.KeyPattern = k + "*"
+				if !strings.HasSuffix(k, "*") {
+					nd.KeyPattern = k + "*"
+				} else {
+					nd.KeyPattern = k
+				}
 				nd.KeyCount += d.KeyCount
 				nd.KeySize += d.KeySize
 				nd.DataSize += d.DataSize
