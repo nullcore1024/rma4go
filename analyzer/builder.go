@@ -176,7 +176,7 @@ type Distribution struct {
 // basic metrics of a group of key
 type Metrics struct {
 	KeyCount       int64 `json:"keyCount" tree:"keyCount"`
-	KeySize        int64 `json:"keySize tree:"keySz""`
+	KeySize        int64 `json:"keySize" tree:"keySz""`
 	DataSize       int64 `json:"dataSize" tree:"dataSz"`
 	KeyNeverExpire int64 `json:"NExpire"`
 	ExpireInHour   int64 `json:"-"` // >= 0h < 1h
@@ -464,22 +464,6 @@ func (dist *Distribution) tableData() []string {
 }
 
 func (stat *KeyStat) MergeTree(meta KeyMeta) {
-	stat.DataSize += meta.DataSize
-	stat.KeySize += meta.KeySize
-	stat.KeyCount++
-	switch {
-	case meta.Ttl < 0:
-		stat.KeyNeverExpire++
-	case meta.Ttl >= 0 && meta.Ttl < Hour:
-		stat.ExpireInHour++
-	case meta.Ttl >= Hour && meta.Ttl < Day:
-		stat.ExpireInDay++
-	case meta.Ttl >= Day && meta.Ttl < Week:
-		stat.ExpireInWeek++
-	case meta.Ttl >= Week:
-		stat.ExpireOutWeek++
-	}
-
 	prefix := getPrefix(meta.Key, 1)
 	token := strings.Split(prefix, flagSeparator)
 
@@ -491,13 +475,11 @@ func (stat *KeyStat) MergeTree(meta KeyMeta) {
 	for i, v := range token {
 		find := root.FindByValue(v)
 		if find == nil {
+			m := &Metrics{}
+			m.MergeMeta(meta)
 			if i == len(token)-1 {
-				m := &Metrics{}
-				m.MergeMeta(meta)
 				root.AddMetaNode(m, v)
 			} else {
-				m := &Metrics{}
-				m.MergeMeta(meta)
 				root = root.AddMetaBranch(m, v)
 			}
 		} else {
@@ -512,22 +494,6 @@ func (stat *KeyStat) MergeTree(meta KeyMeta) {
 }
 
 func (stat *KeyStat) MergePrefix(meta KeyMeta) {
-	stat.DataSize += meta.DataSize
-	stat.KeySize += meta.KeySize
-	stat.KeyCount++
-	switch {
-	case meta.Ttl < 0:
-		stat.KeyNeverExpire++
-	case meta.Ttl >= 0 && meta.Ttl < Hour:
-		stat.ExpireInHour++
-	case meta.Ttl >= Hour && meta.Ttl < Day:
-		stat.ExpireInDay++
-	case meta.Ttl >= Day && meta.Ttl < Week:
-		stat.ExpireInWeek++
-	case meta.Ttl >= Week:
-		stat.ExpireOutWeek++
-	}
-
 	prefix := getPrefix(meta.Key, 1)
 	stat.FillPrefix(&stat.Prefixes, prefix, meta)
 
