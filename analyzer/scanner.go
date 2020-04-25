@@ -103,7 +103,7 @@ func ProducerKey(cli redis.UniversalClient, dbsize int, keyChan chan string, wg 
 			}
 		}
 		if cursor == 0 || err != nil {
-			fmt.Printf("cursor:%d current size:%d, err:%s\n", count, err)
+			fmt.Printf("current size:%d, err:%s\n", count, err)
 			break
 		}
 	}

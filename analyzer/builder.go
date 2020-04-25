@@ -49,7 +49,7 @@ var (
 
 func getPrefix(key string, sub int) string {
 	parts := strings.Split(key, flagSeparator)
-	if len(parts) <= 0 {
+	if len(parts) <= 1 {
 		return key
 	}
 	if len(parts) <= sub {
@@ -367,11 +367,27 @@ func rebuildTreeName(tree *treeNode) {
 	return
 }
 
+func buildRoot(tree *treeNode) {
+	if tree.Nodes == nil {
+		return
+	}
+	for i, _ := range tree.Nodes {
+		tree.Meta.KeyCount += tree.Nodes[i].Meta.KeyCount
+		tree.Meta.KeySize += tree.Nodes[i].Meta.KeySize
+		tree.Meta.DataSize += tree.Nodes[i].Meta.DataSize
+	}
+	token := strings.Split(tree.Value, "_")
+	tree.Value = fmt.Sprintf("%s_%s", token[0], formatSize(tree.Meta.estimatedSize()))
+	//fmt.Printf("dir:%s, key:%d, keycount:%d\n", tree.Value, tree.Meta.KeySize, tree.Meta.KeyCount)
+	return
+}
+
 func (ks *KeyStat) printTree(file string) {
 	if ks.Tree != nil {
 		tree := treeNode{}
 		json.Unmarshal([]byte(ks.Tree.JsonString()), &tree)
 		rebuildTreeName(&tree)
+		buildRoot(&tree)
 		if dump, err := json.Marshal(tree); err == nil {
 			ioutil.WriteFile(file, []byte(dump), 0755)
 		}
@@ -581,39 +597,18 @@ func (stat *KeyStat) Merge(meta KeyMeta) {
 		dists = make(map[string]Distribution, defaultSize)
 	}
 
-	if token := strings.Split(meta.Key, flagSeparator); len(token) > 1 {
-		prefix := getPrefix(meta.Key, 1)
-		if v, ok := dists[prefix]; ok {
-			d := Distribution(v)
-			d.MergeMeta(meta)
-			dists[prefix] = d
-		} else {
-			var d Distribution
-			d.MergeMeta(meta)
-			d.KeyPattern = prefix
-			dists[prefix] = d
-		}
+	prefix := getPrefix(meta.Key, 1)
+	if v, ok := dists[prefix]; ok {
+		d := Distribution(v)
+		d.MergeMeta(meta)
+		dists[prefix] = d
 	} else {
-		keyLen := len(meta.Key)
-
-		// check for if there are already some key in the collection
-		inMap := false
-		for i := 0; i < keyLen; i++ {
-			x := meta.Key[0 : i+1]
-			if v, ok := dists[x]; ok {
-				d := Distribution(v)
-				d.MergeMeta(meta)
-				dists[x] = d
-				inMap = true
-			}
-		}
-		//
-		if !inMap {
-			var d Distribution
-			d.MergeMeta(meta)
-			dists[meta.Key] = d
-		}
+		var d Distribution
+		d.MergeMeta(meta)
+		d.KeyPattern = prefix
+		dists[prefix] = d
 	}
+	//fmt.Printf("prefix key:%s, raw key:%s\n", prefix, meta.Key)
 
 	stat.Distribution = dists
 }
