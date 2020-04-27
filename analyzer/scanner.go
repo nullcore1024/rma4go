@@ -43,11 +43,11 @@ func Run(clis []redis.UniversalClient, sep string, tree, pre, compact bool) Redi
 	emit := make(chan KeyMeta, 4096)
 	ctx, cancel := context.WithCancel(context.Background())
 
-	wg.Add(1)
-	go ProducerKey(cli, dbsize, keyChan, wg)
+	go PipeDo(clis, poolSize-1, dbsize, keyChan, emit, ctx, wg)
 	wg.Add(1)
 	go ConsumerChanMeta(emit, dbsize, ctx, cancel, &stat, wg)
-	go PipeDo(clis, poolSize-1, dbsize, keyChan, emit, ctx, wg)
+	wg.Add(1)
+	go ProducerKey(cli, dbsize, keyChan, wg)
 	fmt.Printf("dbsize:%d\n", dbsize)
 
 	wg.Wait()
@@ -75,10 +75,11 @@ func PipeDo(clis []redis.UniversalClient, poolSize, dbsize int, recv chan string
 				i++
 			}
 		case <-ctx.Done():
-			fmt.Printf("finish consumer key:%d\n", i)
+			fmt.Printf("done finish consumer key:%d\n", i)
 			return
 		}
 	}
+	fmt.Printf("finish consumer key:%d\n", i)
 }
 
 func ProducerKey(cli redis.UniversalClient, dbsize int, keyChan chan string, wg *sync.WaitGroup) {
@@ -107,12 +108,18 @@ func ProducerKey(cli redis.UniversalClient, dbsize int, keyChan chan string, wg 
 			break
 		}
 	}
+	fmt.Printf("finish current size:%d, err:%s\n", count, err)
 }
 
 func ConsumerChanMeta(ch chan KeyMeta, dbsize int, ctx context.Context, cancel func(), stat *RedisStat, wg *sync.WaitGroup) {
 	defer wg.Done()
 
-	batch := dbsize / 10
+	var batch int
+	if (dbsize >> 10) > (1 << 15) {
+		batch = dbsize >> 10
+	} else {
+		batch = dbsize / 10
+	}
 	prev := 0
 	count := 0
 	for {
@@ -121,9 +128,9 @@ func ConsumerChanMeta(ch chan KeyMeta, dbsize int, ctx context.Context, cancel f
 			{
 				count++
 				stat.Merge(meta)
-				if count-prev > batch {
+				if batch != 0 && count-prev > batch {
 					prev = count
-					fmt.Printf("current consumer:%d\n", count)
+					fmt.Printf("current consumer:%d, key:%s\n", count, meta.Key)
 				}
 
 				if count == dbsize {
@@ -139,6 +146,7 @@ func ConsumerChanMeta(ch chan KeyMeta, dbsize int, ctx context.Context, cancel f
 			}
 		}
 	}
+	fmt.Printf("finish consumer size:%d\n", count)
 }
 
 func BatchScanKeys(cli redis.UniversalClient, supportMemUsage bool, key string, limiter chan bool, wg *sync.WaitGroup, emit chan KeyMeta) {
