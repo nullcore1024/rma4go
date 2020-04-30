@@ -31,8 +31,6 @@ func Run(clis []redis.UniversalClient, sep string, tree, pre, compact bool) Redi
 	buildPrefix = pre
 	buildTree = tree
 
-	wg := &sync.WaitGroup{}
-
 	poolSize := len(clis)
 
 	var stat RedisStat
@@ -40,52 +38,79 @@ func Run(clis []redis.UniversalClient, sep string, tree, pre, compact bool) Redi
 	cli := clis[poolSize-1]
 	dbsize := getTotalKeys(cli)
 
-	keyChan := make(chan string, 4096)
-	emit := make(chan KeyMeta, 4096)
 	ctx, cancel := context.WithCancel(context.Background())
 
-	go PipeDo(clis, poolSize-1, dbsize, keyChan, emit, ctx, wg)
-	wg.Add(1)
-	go ConsumerChanMeta(emit, dbsize, ctx, cancel, &stat, wg)
-	wg.Add(1)
-	go ProducerKey(cli, dbsize, keyChan, wg)
+	metaCh, errcConsumer := ConsumerChanMeta(dbsize, ctx, cancel, &stat)
+	keyChan, errcKey := PipeDo(clis, poolSize-1, metaCh, ctx)
+
+	errcScan := ProducerKey(cli, dbsize, keyChan)
+
+	if err := Wait(ctx, cancel, errcScan, errcConsumer, errcKey); err != nil {
+		fmt.Printf("%v", err)
+	}
 	fmt.Printf("dbsize:%d\n", dbsize)
 
-	wg.Wait()
 	return stat
 }
 
-func PipeDo(clis []redis.UniversalClient, poolSize, dbsize int, recv chan string, sender chan KeyMeta, ctx context.Context, wg *sync.WaitGroup) {
+func Wait(ctx context.Context, cancel context.CancelFunc, errcs ...<-chan error) error {
+	errs := make([]error, len(errcs))
+	var wg sync.WaitGroup
+	wg.Add(len(errcs))
+	for index, errc := range errcs {
+		go func(index int, errc <-chan error) {
+			defer wg.Done()
+			err := <-errc
+			if err != nil && err != ctx.Err() {
+				cancel() // notify all to stop
+			}
+			errs[index] = err
+		}(index, errc)
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil && err != ctx.Err() {
+			return err
+		}
+	}
+	return errs[0]
+}
+
+func PipeDo(clis []redis.UniversalClient, poolSize int, sender chan<- KeyMeta, ctx context.Context) (chan<- string, <-chan error) {
 	supportMemUsage := checkSupportMemUsage(clis[0])
 	limiter := make(chan bool, poolSize)
 
+	ch := make(chan string, 4096)
+	errc := make(chan error, 1)
+
+	wg := &sync.WaitGroup{}
+
 	i := 0
-	for {
-		select {
-		case key := <-recv:
-			{
-				if i == dbsize {
-					fmt.Printf("finish key:%d\n", i)
-					break
+	go func() {
+		defer close(ch)
+		errc <- func() error {
+			for {
+				select {
+				case key := <-ch:
+					wg.Add(1)
+					limiter <- true
+
+					go BatchScanKeys(clis[i%poolSize], supportMemUsage, key, limiter, sender, wg)
+					i++
+
+				case <-ctx.Done():
+					return ctx.Err()
+				default:
 				}
-
-				wg.Add(1)
-				limiter <- true
-
-				go BatchScanKeys(clis[uint32(i)%uint32(poolSize)], supportMemUsage, key, limiter, wg, sender)
-				i++
 			}
-		case <-ctx.Done():
-			fmt.Printf("done finish consumer key:%d\n", i)
-			return
-		}
-	}
-	fmt.Printf("finish consumer key:%d\n", i)
+			return nil
+		}()
+		wg.Wait()
+	}()
+	return ch, errc
 }
 
-func ProducerKey(cli redis.UniversalClient, dbsize int, keyChan chan string, wg *sync.WaitGroup) {
-	defer wg.Done()
-
+func ProducerKey(cli redis.UniversalClient, dbsize int, keyChan chan<- string) <-chan error {
 	var (
 		ks     []string
 		err    error
@@ -93,6 +118,8 @@ func ProducerKey(cli redis.UniversalClient, dbsize int, keyChan chan string, wg 
 		prev   int
 		cursor uint64 = 0
 	)
+	errc := make(chan error, 1)
+
 	var batch int
 	if (dbsize >> 10) > (1 << 15) {
 		batch = dbsize >> 10
@@ -103,29 +130,37 @@ func ProducerKey(cli redis.UniversalClient, dbsize int, keyChan chan string, wg 
 	fmt.Printf("%v, start total count:%d, dbsize:%d\n", time.Now(), count, dbsize)
 	//bar := pb.StartNew(dbsize)
 
-	for {
-		scmd := cli.Scan(cursor, cmder.GetMatch(), scanCount)
-		ks, cursor, err = scmd.Result()
-		if len(ks) > 0 {
-			count += len(ks)
-			for i := range ks {
-				keyChan <- ks[i]
+	go func() {
+		errc <- func() error {
+			for {
+				scmd := cli.Scan(cursor, cmder.GetMatch(), scanCount)
+				ks, cursor, err = scmd.Result()
+				if len(ks) > 0 {
+					count += len(ks)
+					for i := range ks {
+						fmt.Printf("produce key:%s\n", ks[i])
+						keyChan <- ks[i]
+					}
+					if batch != 0 && count-prev > batch {
+						prev = count
+						fmt.Printf("%v, scan key count:%d\n", time.Now(), count)
+					}
+				}
+				if cursor == 0 || err != nil {
+					fmt.Printf("current size:%d, err:%s\n", count, err)
+					break
+				}
 			}
-			if batch != 0 && count-prev > batch {
-				prev = count
-				fmt.Printf("%v, scan key count:%d\n", time.Now(), count)
-			}
-		}
-		if cursor == 0 || err != nil {
-			fmt.Printf("current size:%d, err:%s\n", count, err)
-			break
-		}
-	}
-	fmt.Printf("finish current size:%d, err:%s\n", count, err)
+			return nil
+		}()
+		fmt.Printf("finish current size:%d, err:%s\n", count, err)
+	}()
+	return errc
 }
 
-func ConsumerChanMeta(ch chan KeyMeta, dbsize int, ctx context.Context, cancel func(), stat *RedisStat, wg *sync.WaitGroup) {
-	defer wg.Done()
+func ConsumerChanMeta(dbsize int, ctx context.Context, cancel func(), stat *RedisStat) (chan<- KeyMeta, <-chan error) {
+	ch := make(chan KeyMeta, 4096)
+	errc := make(chan error, 1)
 
 	var batch int
 	if (dbsize >> 10) > (1 << 15) {
@@ -135,41 +170,43 @@ func ConsumerChanMeta(ch chan KeyMeta, dbsize int, ctx context.Context, cancel f
 	}
 	prev := 0
 	count := 0
-	for {
-		select {
-		case meta := <-ch:
-			{
+	go func() {
+		defer close(ch)
+		errc <- func() error {
+			for meta := range ch {
 				count++
 				stat.Merge(meta)
+
 				if batch != 0 && count-prev > batch {
 					prev = count
 					fmt.Printf("%v, current consumer:%d, key:%s\n", time.Now(), count, meta.Key)
 				}
-
 				if count == dbsize {
-					fmt.Printf("finish consumer:%d\n", count)
 					cancel()
-					continue
+					fmt.Printf("finish current keyMeta size:%d\n", count)
+				}
+
+				select {
+				case <-ctx.Done():
+					fmt.Println("notify close", count)
+					return ctx.Err()
+				default:
 				}
 			}
-		case <-ctx.Done():
-			{
-				fmt.Println("notify close", count)
-				return
-			}
-		}
-	}
-	fmt.Printf("finish consumer size:%d\n", count)
+			return nil
+		}()
+	}()
+	return ch, errc
 }
 
-func BatchScanKeys(cli redis.UniversalClient, supportMemUsage bool, key string, limiter chan bool, wg *sync.WaitGroup, emit chan KeyMeta) {
+func BatchScanKeys(cli redis.UniversalClient, supportMemUsage bool, key string, limiter chan bool, emit chan<- KeyMeta, wg *sync.WaitGroup) {
 	defer wg.Done()
 	GetKeysMeta(cli, supportMemUsage, key, emit)
 	<-limiter
 	return
 }
 
-func GetKeysMeta(cli redis.UniversalClient, supportMemUsage bool, key string, emit chan KeyMeta) int {
+func GetKeysMeta(cli redis.UniversalClient, supportMemUsage bool, key string, emit chan<- KeyMeta) int {
 	//for i := range keys {
 	meta := GetKeyMeta(cli, supportMemUsage, key)
 	emit <- meta
