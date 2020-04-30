@@ -8,10 +8,11 @@ import (
 	"github.com/winjeg/redis"
 	_ "gopkg.in/cheggaaa/pb.v1"
 	"sync"
+	"time"
 )
 
 const (
-	scanCount   = 1024
+	scanCount   = 512
 	compactSize = 10240
 
 	// cause the real memory used by redis is a little bigger than the content
@@ -89,9 +90,17 @@ func ProducerKey(cli redis.UniversalClient, dbsize int, keyChan chan string, wg 
 		ks     []string
 		err    error
 		count  int
+		prev   int
 		cursor uint64 = 0
 	)
-	fmt.Printf("start total count:%d, dbsize:%d\n", count, dbsize)
+	var batch int
+	if (dbsize >> 10) > (1 << 15) {
+		batch = dbsize >> 10
+	} else {
+		batch = dbsize / 10
+	}
+
+	fmt.Printf("%v, start total count:%d, dbsize:%d\n", time.Now(), count, dbsize)
 	//bar := pb.StartNew(dbsize)
 
 	for {
@@ -101,6 +110,10 @@ func ProducerKey(cli redis.UniversalClient, dbsize int, keyChan chan string, wg 
 			count += len(ks)
 			for i := range ks {
 				keyChan <- ks[i]
+			}
+			if batch != 0 && count-prev > batch {
+				prev = count
+				fmt.Printf("%v, scan key count:%d\n", time.Now(), count)
 			}
 		}
 		if cursor == 0 || err != nil {
@@ -130,7 +143,7 @@ func ConsumerChanMeta(ch chan KeyMeta, dbsize int, ctx context.Context, cancel f
 				stat.Merge(meta)
 				if batch != 0 && count-prev > batch {
 					prev = count
-					fmt.Printf("current consumer:%d, key:%s\n", count, meta.Key)
+					fmt.Printf("%v, current consumer:%d, key:%s\n", time.Now(), count, meta.Key)
 				}
 
 				if count == dbsize {
@@ -221,14 +234,24 @@ func GetKeyMeta(cli redis.UniversalClient, supportMemUsage bool, key string) Key
 }
 
 func ScanAllKeys(cli redis.UniversalClient, sep string, tree, pre, compact bool) RedisStat {
+	flagSeparator = sep
+	buildPrefix = pre
+	buildTree = tree
+
 	supportMemUsage := checkSupportMemUsage(cli)
 	var stat RedisStat
 	scmd := cli.Scan(0, cmder.GetMatch(), scanCount)
 	count := 0
 
 	dbsize := getTotalKeys(cli)
-	batch := dbsize / 10
-	fmt.Printf("start total count:%d, dbsize:%d\n", count, dbsize)
+	var batch int
+	if (dbsize >> 10) > (1 << 15) {
+		batch = dbsize >> 10
+	} else {
+		batch = dbsize / 10
+	}
+
+	fmt.Printf("%v, start total count:%d, dbsize:%d\n", time.Now(), count, dbsize)
 	//bar := pb.StartNew(dbsize)
 
 	if scmd != nil {
@@ -250,7 +273,7 @@ func ScanAllKeys(cli redis.UniversalClient, sep string, tree, pre, compact bool)
 				}
 			}
 			if count%batch == 0 {
-				fmt.Printf("current count:%d, dbsize:%d\n", count, dbsize)
+				fmt.Printf("%v, current count:%d, dbsize:%d\n", time.Now(), count, dbsize)
 			}
 			if err != nil {
 				fmt.Printf("cursor:%d current size:%d, err:%s\n", count, err)

@@ -154,7 +154,11 @@ func printKeyStat() {
 		}
 		clis = append(clis, cli)
 	}
-
+	if pool == 1 {
+		stat := analyzer.ScanAllKeys(clis[0], cmder.GetSeparator(), cmder.GetTree(), cmder.GetPrefix(), cmder.GetCompact())
+		stat.Print()
+		return
+	}
 	stat := analyzer.Run(clis, cmder.GetSeparator(), cmder.GetTree(), cmder.GetPrefix(), cmder.GetCompact())
 	stat.Print()
 }
