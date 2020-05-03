@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/fatih/color"
-	"github.com/nullcore1024/rma4go/treeprint"
+	//"github.com/nullcore1024/rma4go/treeprint"
 	"github.com/olekukonko/tablewriter"
 	"io/ioutil"
 	"os"
@@ -163,7 +163,7 @@ type KeyStat struct {
 	Prefixes     map[string]Distribution `json:"prefix"`
 	FPrefixes    map[string]Distribution `json:"prefix"`
 	GFPrefixes   map[string]Distribution `json:"prefix"`
-	Tree         treeprint.Tree
+	Tree         *DictTree
 	Metrics
 }
 
@@ -176,9 +176,9 @@ type Distribution struct {
 // basic metrics of a group of key
 type Metrics struct {
 	KeyCount       int64 `json:"keyCount" tree:"keyCount"`
-	KeySize        int64 `json:"keySize" tree:"keySz""`
-	DataSize       int64 `json:"dataSize" tree:"dataSz"`
-	KeyNeverExpire int64 `json:"NExpire"`
+	KeySize        int64 `json:"keySz" tree:"keySz""`
+	DataSize       int64 `json:"dataSz" tree:"dataSz"`
+	KeyNeverExpire int64 `json:"-"`
 	ExpireInHour   int64 `json:"-"` // >= 0h < 1h
 	ExpireInDay    int64 `json:"-"` // >= 1h < 24h
 	ExpireInWeek   int64 `json:"-"` // >= 1d < 7d
@@ -328,7 +328,7 @@ func (stat *RedisStat) Print() {
 type treeNode struct {
 	Meta  Metrics    `json:"Meta"`
 	Value string     `json:"N"`
-	Nodes []treeNode `json:"SN"`
+	Nodes []treeNode `json:"SN,omitempty"`
 }
 
 func (items treeNode) sortedSlice() []treeNode {
@@ -367,30 +367,73 @@ func rebuildTreeName(tree *treeNode) {
 	return
 }
 
-func buildRoot(tree *treeNode) {
+func buildRoot(root TreePrint, nn *treeNode) {
+	if root == nil {
+		return
+	}
+	tree := root.(*DictTree)
 	if tree.Nodes == nil {
 		return
 	}
-	for i, _ := range tree.Nodes {
-		tree.Meta.KeyCount += tree.Nodes[i].Meta.KeyCount
-		tree.Meta.KeySize += tree.Nodes[i].Meta.KeySize
-		tree.Meta.DataSize += tree.Nodes[i].Meta.DataSize
+
+	nn.Nodes = make([]treeNode, len(tree.Nodes))
+
+	Meta := &Metrics{}
+	if m, ok := tree.GetMetaValue().(*Metrics); ok {
+		Meta = m
 	}
-	token := strings.Split(tree.Value, "_")
-	tree.Value = fmt.Sprintf("%s_%s", token[0], formatSize(tree.Meta.estimatedSize()))
+	i := 0
+	for k, node := range tree.Nodes {
+		an := &treeNode{
+			Value: k,
+		}
+		buildRoot(node, an)
+		nn.Nodes[i] = *an
+		i++
+	}
+
+	nn.Nodes = nn.sortedSlice()
+	nn.Value = fmt.Sprintf("%s_%s", nn.Value, formatSize(Meta.estimatedSize()))
+	nn.Meta = *Meta
 	//fmt.Printf("dir:%s, key:%d, keycount:%d\n", tree.Value, tree.Meta.KeySize, tree.Meta.KeyCount)
 	return
 }
 
 func (ks *KeyStat) printTree(file string) {
 	if ks.Tree != nil {
-		tree := treeNode{}
-		json.Unmarshal([]byte(ks.Tree.JsonString()), &tree)
-		rebuildTreeName(&tree)
-		buildRoot(&tree)
-		if dump, err := json.Marshal(tree); err == nil {
+		Meta := &Metrics{}
+		if m, ok := ks.Tree.GetMetaValue().(*Metrics); ok {
+			Meta = m
+		}
+		for _, node := range ks.Tree.Nodes {
+			val := node.GetMetaValue()
+			if m, ok := val.(*Metrics); ok {
+				Meta.KeyCount += m.KeyCount
+				Meta.KeySize += m.KeySize
+				Meta.DataSize += m.DataSize
+			}
+		}
+		/*
+			if dump, err := json.Marshal(ks.Tree); err == nil {
+				ioutil.WriteFile(file, []byte(dump), 0755)
+			}
+		*/
+
+		node := treeNode{}
+		buildRoot(ks.Tree, &node)
+		if dump, err := json.Marshal(node); err == nil {
 			ioutil.WriteFile(file, []byte(dump), 0755)
 		}
+
+		/*
+			tree := treeNode{}
+			json.Unmarshal([]byte(ks.Tree.JsonString()), &tree)
+			rebuildTreeName(&tree)
+			buildRoot(&tree)
+			if dump, err := json.Marshal(tree); err == nil {
+				ioutil.WriteFile(file, []byte(dump), 0755)
+			}
+		*/
 	}
 }
 
@@ -479,14 +522,82 @@ func (dist *Distribution) tableData() []string {
 	return result
 }
 
+type TreePrint interface {
+	AddMetaBranch(v interface{}, name string) TreePrint
+	AddMetaNode(v interface{}, name string) TreePrint
+	FindByValue(name string) TreePrint
+	JsonString() string
+
+	GetMetaValue() interface{}
+	SetMetaValue(v interface{})
+}
+
+type DictTree struct {
+	Name  string               `json:"name"`
+	Meta  interface{}          `json:"meta"`
+	Nodes map[string]TreePrint `json:"node"`
+}
+
+func NEWDict(v interface{}) *DictTree {
+	return &DictTree{
+		Meta:  v,
+		Nodes: make(map[string]TreePrint),
+	}
+}
+
+func NewDict(name string, v interface{}) TreePrint {
+	return &DictTree{
+		Name:  name,
+		Meta:  v,
+		Nodes: make(map[string]TreePrint),
+	}
+}
+
+func (thiz *DictTree) AddMetaNode(v interface{}, name string) TreePrint {
+	node := NewDict(name, v)
+	thiz.Nodes[name] = node
+	return node
+}
+
+func (thiz *DictTree) JsonString() string {
+	if dump, err := json.Marshal(thiz); err == nil {
+		return string(dump)
+	}
+	return ""
+}
+
+func (thiz *DictTree) AddMetaBranch(v interface{}, name string) TreePrint {
+	if thiz.Nodes == nil {
+		thiz.Nodes = make(map[string]TreePrint)
+	}
+	node := NewDict(name, v)
+	thiz.Nodes[name] = node
+	return node
+}
+
+func (thiz *DictTree) FindByValue(name string) TreePrint {
+	if val, ok := thiz.Nodes[name]; ok {
+		return val
+	}
+	return nil
+}
+
+func (thiz *DictTree) GetMetaValue() interface{} {
+	return thiz.Meta
+}
+
+func (thiz *DictTree) SetMetaValue(v interface{}) {
+	thiz.Meta = v
+}
+
 func (stat *KeyStat) MergeTree(meta KeyMeta) {
 	prefix := getPrefix(meta.Key, 1)
 	token := strings.Split(prefix, flagSeparator)
 
 	if stat.Tree == nil {
-		stat.Tree = treeprint.New()
+		stat.Tree = NEWDict(&Metrics{})
 	}
-	var root treeprint.Tree = stat.Tree
+	var root TreePrint = stat.Tree
 
 	for i, v := range token {
 		find := root.FindByValue(v)

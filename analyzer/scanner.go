@@ -4,7 +4,9 @@ package analyzer
 import (
 	"context"
 	"fmt"
+
 	"github.com/nullcore1024/rma4go/cmder"
+	log "github.com/sirupsen/logrus"
 	"github.com/winjeg/redis"
 	_ "gopkg.in/cheggaaa/pb.v1"
 	"sync"
@@ -49,7 +51,7 @@ func Run(clis []redis.UniversalClient, sep string, tree, pre, compact bool) Redi
 	go ConsumerChanMeta(emit, dbsize, ctx, cancel, &stat, wg)
 	wg.Add(1)
 	go ProducerKey(cli, dbsize, keyChan, wg)
-	fmt.Printf("dbsize:%d\n", dbsize)
+	log.Infof("dbsize:%d", dbsize)
 
 	wg.Wait()
 	return stat
@@ -65,7 +67,7 @@ func PipeDo(clis []redis.UniversalClient, poolSize, dbsize int, recv chan string
 		case key := <-recv:
 			{
 				if i == dbsize {
-					fmt.Printf("finish key:%d\n", i)
+					log.Infof("finish key:%d", i)
 					break
 				}
 
@@ -76,11 +78,11 @@ func PipeDo(clis []redis.UniversalClient, poolSize, dbsize int, recv chan string
 				i++
 			}
 		case <-ctx.Done():
-			fmt.Printf("done finish consumer key:%d\n", i)
+			log.Infof("done finish consumer key:%d", i)
 			return
 		}
 	}
-	fmt.Printf("finish consumer key:%d\n", i)
+	log.Infof("finish consumer key:%d", i)
 }
 
 func ProducerKey(cli redis.UniversalClient, dbsize int, keyChan chan string, wg *sync.WaitGroup) {
@@ -100,7 +102,7 @@ func ProducerKey(cli redis.UniversalClient, dbsize int, keyChan chan string, wg 
 		batch = dbsize / 10
 	}
 
-	fmt.Printf("%v, start total count:%d, dbsize:%d\n", time.Now(), count, dbsize)
+	log.Infof("%v, start total count:%d, dbsize:%d", time.Now().Local(), count, dbsize)
 	//bar := pb.StartNew(dbsize)
 
 	for {
@@ -113,15 +115,15 @@ func ProducerKey(cli redis.UniversalClient, dbsize int, keyChan chan string, wg 
 			}
 			if batch != 0 && count-prev > batch {
 				prev = count
-				fmt.Printf("%v, scan key count:%d\n", time.Now(), count)
+				log.Infof("%v, scan key count:%d", time.Now().Local(), count)
 			}
 		}
 		if cursor == 0 || err != nil {
-			fmt.Printf("current size:%d, err:%s\n", count, err)
+			log.Infof("current size:%d, err:%s", count, err)
 			break
 		}
 	}
-	fmt.Printf("finish current size:%d, err:%s\n", count, err)
+	log.Infof("finish current size:%d, err:%s", count, err)
 }
 
 func ConsumerChanMeta(ch chan KeyMeta, dbsize int, ctx context.Context, cancel func(), stat *RedisStat, wg *sync.WaitGroup) {
@@ -143,11 +145,12 @@ func ConsumerChanMeta(ch chan KeyMeta, dbsize int, ctx context.Context, cancel f
 				stat.Merge(meta)
 				if batch != 0 && count-prev > batch {
 					prev = count
-					fmt.Printf("%v, current consumer:%d, key:%s\n", time.Now(), count, meta.Key)
+					log.Infof("%v, current consumer:%d, key:%s", time.Now().Local(), count, meta.Key)
 				}
+				log.Infof("type=%s, key=%s, keysz=%d, dataSz=%d", meta.Type, meta.Key, meta.KeySize, meta.DataSize)
 
 				if count == dbsize {
-					fmt.Printf("finish consumer:%d\n", count)
+					log.Infof("finish consumer:%d", count)
 					cancel()
 					continue
 				}
@@ -159,7 +162,7 @@ func ConsumerChanMeta(ch chan KeyMeta, dbsize int, ctx context.Context, cancel f
 			}
 		}
 	}
-	fmt.Printf("finish consumer size:%d\n", count)
+	log.Infof("finish consumer size:%d", count)
 }
 
 func BatchScanKeys(cli redis.UniversalClient, supportMemUsage bool, key string, limiter chan bool, wg *sync.WaitGroup, emit chan KeyMeta) {
@@ -251,7 +254,7 @@ func ScanAllKeys(cli redis.UniversalClient, sep string, tree, pre, compact bool)
 		batch = dbsize / 10
 	}
 
-	fmt.Printf("%v, start total count:%d, dbsize:%d\n", time.Now(), count, dbsize)
+	log.Infof("%v, start total count:%d, dbsize:%d", time.Now().Local(), count, dbsize)
 	//bar := pb.StartNew(dbsize)
 
 	if scmd != nil {
@@ -273,20 +276,20 @@ func ScanAllKeys(cli redis.UniversalClient, sep string, tree, pre, compact bool)
 				}
 			}
 			if count%batch == 0 {
-				fmt.Printf("%v, current count:%d, dbsize:%d\n", time.Now(), count, dbsize)
+				log.Infof("%v, current count:%d, dbsize:%d", time.Now().Local(), count, dbsize)
 			}
 			if err != nil {
-				fmt.Printf("cursor:%d current size:%d, err:%s\n", count, err)
+				log.Infof("cursor:%d current size:%d, err:%s", count, err)
 				break
 			}
 			// compact for every 40k keys
 			if compact && (len(stat.All.Distribution) > compactSize) {
-				fmt.Printf("compacting...   current size:%d\n", count)
+				log.Infof("compacting...   current size:%d", count)
 				stat.Compact()
 			}
 		}
 	}
-	fmt.Printf("scan count:%d, dbsize:%d", count, dbsize)
+	log.Infof("scan count:%d, dbsize:%d", count, dbsize)
 	if compact {
 		stat.Compact()
 	}
