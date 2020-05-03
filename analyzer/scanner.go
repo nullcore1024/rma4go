@@ -43,7 +43,7 @@ func Run(clis []redis.UniversalClient, sep string, tree, pre, compact bool) Redi
 	dbsize := getTotalKeys(cli)
 
 	keyChan := make(chan string, 4096)
-	emit := make(chan KeyMeta, 4096)
+	emit := make(chan *KeyMeta, 4096)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	go PipeDo(clis, poolSize-1, dbsize, keyChan, emit, ctx, wg)
@@ -57,7 +57,7 @@ func Run(clis []redis.UniversalClient, sep string, tree, pre, compact bool) Redi
 	return stat
 }
 
-func PipeDo(clis []redis.UniversalClient, poolSize, dbsize int, recv chan string, sender chan KeyMeta, ctx context.Context, wg *sync.WaitGroup) {
+func PipeDo(clis []redis.UniversalClient, poolSize, dbsize int, recv chan string, sender chan *KeyMeta, ctx context.Context, wg *sync.WaitGroup) {
 	supportMemUsage := checkSupportMemUsage(clis[0])
 	limiter := make(chan bool, poolSize)
 
@@ -126,7 +126,7 @@ func ProducerKey(cli redis.UniversalClient, dbsize int, keyChan chan string, wg 
 	log.Infof("finish current size:%d, err:%s", count, err)
 }
 
-func ConsumerChanMeta(ch chan KeyMeta, dbsize int, ctx context.Context, cancel func(), stat *RedisStat, wg *sync.WaitGroup) {
+func ConsumerChanMeta(ch chan *KeyMeta, dbsize int, ctx context.Context, cancel func(), stat *RedisStat, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	var batch int
@@ -142,12 +142,13 @@ func ConsumerChanMeta(ch chan KeyMeta, dbsize int, ctx context.Context, cancel f
 		case meta := <-ch:
 			{
 				count++
-				stat.Merge(meta)
+				stat.Merge(*meta)
 				if batch != 0 && count-prev > batch {
 					prev = count
 					log.Infof("%v, current consumer:%d, key:%s", time.Now().Local(), count, meta.Key)
 				}
-				log.Infof("type=%s, key=%s, keysz=%d, dataSz=%d", meta.Type, meta.Key, meta.KeySize, meta.DataSize)
+				log.Debugf("type=%s, key=%s, keysz=%d, dataSz=%d", meta.Type, meta.Key, meta.KeySize, meta.DataSize)
+				FreeKeyMeta(meta)
 
 				if count == dbsize {
 					log.Infof("finish consumer:%d", count)
@@ -165,22 +166,22 @@ func ConsumerChanMeta(ch chan KeyMeta, dbsize int, ctx context.Context, cancel f
 	log.Infof("finish consumer size:%d", count)
 }
 
-func BatchScanKeys(cli redis.UniversalClient, supportMemUsage bool, key string, limiter chan bool, wg *sync.WaitGroup, emit chan KeyMeta) {
+func BatchScanKeys(cli redis.UniversalClient, supportMemUsage bool, key string, limiter chan bool, wg *sync.WaitGroup, emit chan *KeyMeta) {
 	defer wg.Done()
 	GetKeysMeta(cli, supportMemUsage, key, emit)
 	<-limiter
 	return
 }
 
-func GetKeysMeta(cli redis.UniversalClient, supportMemUsage bool, key string, emit chan KeyMeta) int {
+func GetKeysMeta(cli redis.UniversalClient, supportMemUsage bool, key string, emit chan *KeyMeta) int {
 	//for i := range keys {
 	meta := GetKeyMeta(cli, supportMemUsage, key)
 	emit <- meta
 	return 0
 }
 
-func GetKeyMeta(cli redis.UniversalClient, supportMemUsage bool, key string) KeyMeta {
-	var meta KeyMeta
+func GetKeyMeta(cli redis.UniversalClient, supportMemUsage bool, key string) *KeyMeta {
+	meta := NewKeyMeta()
 	meta.Key = key
 	meta.KeySize = int64(len(key))
 	ttl, err := cli.PTTL(key).Result()

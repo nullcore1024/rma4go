@@ -9,7 +9,7 @@ import (
 
 type Client = redis.UniversalClient
 
-const defaultPoolSize = 3
+const defaultPoolSize = 6
 
 type ConnInfo struct {
 	Host string

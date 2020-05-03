@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/fatih/color"
+	"sync"
 	//"github.com/nullcore1024/rma4go/treeprint"
 	"github.com/olekukonko/tablewriter"
 	"io/ioutil"
@@ -106,13 +107,13 @@ func (item PrefixItem) estimatedSize() int64 {
 func formatSize(size int64) string {
 	switch {
 	case size < 1024:
-		return fmt.Sprintf("%d B", size)
+		return fmt.Sprintf("%dB", size)
 	case size < 1024*1024:
-		return fmt.Sprintf("%.3g KB", float64(size)/1024)
+		return fmt.Sprintf("%.3gKB", float64(size)/1024)
 	case size < 1024*1024*1024:
-		return fmt.Sprintf("%.3g MB", float64(size)/(1024*1024))
+		return fmt.Sprintf("%.3gMB", float64(size)/(1024*1024))
 	default:
-		return fmt.Sprintf("%.3g GB", float64(size)/(1024*1024*1024))
+		return fmt.Sprintf("%.3gGB", float64(size)/(1024*1024*1024))
 	}
 }
 
@@ -122,6 +123,21 @@ type KeyMeta struct {
 	DataSize int64
 	Ttl      int64
 	Type     string
+}
+
+var KeyMetaPool = sync.Pool{
+	New: func() interface{} {
+		return new(KeyMeta)
+	},
+}
+
+func NewKeyMeta() *KeyMeta {
+	c := KeyMetaPool.Get().(*KeyMeta)
+	return c
+}
+
+func FreeKeyMeta(key *KeyMeta) {
+	KeyMetaPool.Put(key)
 }
 
 type RedisStat struct {
@@ -399,6 +415,45 @@ func buildRoot(root TreePrint, nn *treeNode) {
 	return
 }
 
+func IsDir(path string) bool {
+	s, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return s.IsDir()
+}
+
+func mkdir(path string) error {
+	if IsDir(path) {
+		return nil
+	}
+	err := os.Mkdir(path, os.ModePerm)
+	if err != nil {
+		fmt.Println(err)
+	}
+	return err
+}
+
+func buildDir(parent string, nn *treeNode) {
+	if nn == nil {
+		return
+	}
+	var content []byte
+	for i, _ := range nn.Nodes {
+		content = append(content, byte('a'+i))
+	}
+
+	for i, node := range nn.Nodes {
+		rootdir := fmt.Sprintf("%s/%s", parent, node.Value)
+		mkdir(rootdir)
+
+		tmpfile := fmt.Sprintf("%s/%d", rootdir, i)
+		ioutil.WriteFile(tmpfile, []byte(content[0:len(nn.Nodes)-i]), 0755)
+
+		buildDir(rootdir, &nn.Nodes[i])
+	}
+}
+
 func (ks *KeyStat) printTree(file string) {
 	if ks.Tree != nil {
 		Meta := &Metrics{}
@@ -421,6 +476,11 @@ func (ks *KeyStat) printTree(file string) {
 
 		node := treeNode{}
 		buildRoot(ks.Tree, &node)
+
+		mkdir("./data/")
+		mkdir("./data/" + file)
+		buildDir("./data/"+file, &node)
+
 		if dump, err := json.Marshal(node); err == nil {
 			ioutil.WriteFile(file, []byte(dump), 0755)
 		}
