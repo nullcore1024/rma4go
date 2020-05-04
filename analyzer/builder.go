@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/fatih/color"
+	"regexp"
 	"sync"
 	//"github.com/nullcore1024/rma4go/treeprint"
 	"github.com/olekukonko/tablewriter"
@@ -177,8 +178,6 @@ func sortedSlice(Prefixes map[string]Distribution) []Distribution {
 type KeyStat struct {
 	Distribution map[string]Distribution `json:"distribution"`
 	Prefixes     map[string]Distribution `json:"prefix"`
-	FPrefixes    map[string]Distribution `json:"prefix"`
-	GFPrefixes   map[string]Distribution `json:"prefix"`
 	Tree         *DictTree
 	Metrics
 }
@@ -191,10 +190,10 @@ type Distribution struct {
 
 // basic metrics of a group of key
 type Metrics struct {
-	KeyCount       int64 `json:"keyCount" tree:"keyCount"`
 	KeySize        int64 `json:"keySz" tree:"keySz""`
 	DataSize       int64 `json:"dataSz" tree:"dataSz"`
-	KeyNeverExpire int64 `json:"-"`
+	KeyCount       int32 `json:"keyCount" tree:"keyCount"`
+	KeyNeverExpire int32 `json:"-"`
 	ExpireInHour   int64 `json:"-"` // >= 0h < 1h
 	ExpireInDay    int64 `json:"-"` // >= 1h < 24h
 	ExpireInWeek   int64 `json:"-"` // >= 1d < 7d
@@ -220,6 +219,7 @@ func (m *Metrics) MergeMeta(meta KeyMeta) {
 		m.ExpireInWeek++
 	case meta.Ttl >= Week:
 		m.ExpireOutWeek++
+	default:
 	}
 }
 
@@ -285,32 +285,18 @@ func (stat *RedisStat) PrintTree() {
 func (stat *RedisStat) PrintPrefix() {
 	color.Green("\n\nall keys statistics\n\n")
 	stat.All.printPrefixTable()
-	stat.All.printPrefixParentTable()
-	stat.All.printPrefixGParentTable()
 	color.Green("\n\nstring keys statistics\n\n")
 	stat.String.printPrefixTable()
-	stat.String.printPrefixParentTable()
-	stat.String.printPrefixGParentTable()
 	color.Green("\n\nlist keys statistics\n\n")
 	stat.List.printPrefixTable()
-	stat.List.printPrefixParentTable()
-	stat.List.printPrefixGParentTable()
 	color.Green("\n\nhash keys statistics\n\n")
 	stat.Hash.printPrefixTable()
-	stat.Hash.printPrefixParentTable()
-	stat.Hash.printPrefixGParentTable()
 	color.Green("\n\nset keys statistics\n\n")
 	stat.Set.printPrefixTable()
-	stat.Set.printPrefixParentTable()
-	stat.Set.printPrefixGParentTable()
 	color.Green("\n\nzset keys statistics\n\n")
 	stat.ZSet.printPrefixTable()
-	stat.ZSet.printPrefixParentTable()
-	stat.ZSet.printPrefixGParentTable()
 	color.Green("\n\nother keys statistics\n\n")
 	stat.Other.printPrefixTable()
-	stat.Other.printPrefixParentTable()
-	stat.Other.printPrefixGParentTable()
 	color.Green("\n\nbig keys statistics\n\n")
 	stat.BigKeys.printPrefixTable()
 }
@@ -335,10 +321,9 @@ func (stat *RedisStat) Print() {
 	stat.BigKeys.printTable()
 
 	color.Green("\n\n==================abcpreifx===================\n\n")
-	if buildPrefix {
-		stat.PrintPrefix()
+	if buildTree {
+		stat.PrintTree()
 	}
-	stat.PrintTree()
 }
 
 type treeNode struct {
@@ -468,18 +453,18 @@ func (ks *KeyStat) printTree(file string) {
 				Meta.DataSize += m.DataSize
 			}
 		}
-		/*
-			if dump, err := json.Marshal(ks.Tree); err == nil {
-				ioutil.WriteFile(file, []byte(dump), 0755)
-			}
-		*/
+		if dump, err := json.Marshal(ks.Tree); err == nil {
+			ioutil.WriteFile("tree."+file, []byte(dump), 0755)
+		}
 
 		node := treeNode{}
 		buildRoot(ks.Tree, &node)
 
-		mkdir("./data/")
-		mkdir("./data/" + file)
-		buildDir("./data/"+file, &node)
+		/*
+			mkdir("./data/")
+			mkdir("./data/" + file)
+			buildDir("./data/"+file, &node)
+		*/
 
 		if dump, err := json.Marshal(node); err == nil {
 			ioutil.WriteFile(file, []byte(dump), 0755)
@@ -505,50 +490,6 @@ func (ks *KeyStat) printPrefixTable() {
 	table.SetCenterSeparator("|")
 
 	for _, v := range sortedSlice(ks.Prefixes) {
-		table.Append(v.tableData())
-	}
-	footer := make([]string, 0, metricSize+1)
-	footer = append(footer, "total")
-	footer = append(footer, ks.data()...)
-	table.Append(footer)
-	table.Render()
-}
-
-func (ks *KeyStat) printPrefixParentTable() {
-	prefix := sortedSlice(ks.FPrefixes)
-	if len(prefix) == 0 {
-		return
-	}
-
-	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{"fpattern", "key num", "key size", "data size", "expire in hour", "expire in day",
-		"expire in week", "expire out week", "never expire"})
-	table.SetBorders(tablewriter.Border{Left: true, Top: false, Right: true, Bottom: false})
-	table.SetCenterSeparator("|")
-
-	for _, v := range prefix {
-		table.Append(v.tableData())
-	}
-	footer := make([]string, 0, metricSize+1)
-	footer = append(footer, "total")
-	footer = append(footer, ks.data()...)
-	table.Append(footer)
-	table.Render()
-}
-
-func (ks *KeyStat) printPrefixGParentTable() {
-	prefix := sortedSlice(ks.GFPrefixes)
-	if len(prefix) == 0 {
-		return
-	}
-
-	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{"gfpattern", "key num", "key size", "data size", "expire in hour", "expire in day",
-		"expire in week", "expire out week", "never expire"})
-	table.SetBorders(tablewriter.Border{Left: true, Top: false, Right: true, Bottom: false})
-	table.SetCenterSeparator("|")
-
-	for _, v := range prefix {
 		table.Append(v.tableData())
 	}
 	footer := make([]string, 0, metricSize+1)
@@ -650,9 +591,29 @@ func (thiz *DictTree) SetMetaValue(v interface{}) {
 	thiz.Meta = v
 }
 
+func skipNum(token []string) []string {
+	if len(token) <= 2 {
+		return token
+	}
+	del := 0
+	sz := len(token) - 1
+	pattern := "\\d+" //反斜杠要转义
+	result, _ := regexp.MatchString(pattern, token[sz])
+	if result {
+		del++
+	}
+	result, _ = regexp.MatchString(pattern, token[sz-1])
+	if result {
+		del++
+	}
+	return token[0 : sz-del]
+}
+
 func (stat *KeyStat) MergeTree(meta KeyMeta) {
 	prefix := getPrefix(meta.Key, 1)
-	token := strings.Split(prefix, flagSeparator)
+	sp := strings.Split(prefix, flagSeparator)
+
+	token := skipNum(sp)
 
 	if stat.Tree == nil {
 		stat.Tree = NEWDict(&Metrics{})
@@ -680,87 +641,13 @@ func (stat *KeyStat) MergeTree(meta KeyMeta) {
 	}
 }
 
-func (stat *KeyStat) MergePrefix(meta KeyMeta) {
-	prefix := getPrefix(meta.Key, 1)
-	stat.FillPrefix(&stat.Prefixes, prefix, meta)
-
-	fprefix := getPrefix(meta.Key, 2)
-	if strings.Compare(prefix, fprefix) != 0 {
-		stat.FillPrefix(&stat.FPrefixes, fprefix, meta)
-
-		gfprefix := getPrefix(meta.Key, 4)
-		find := false
-
-		for k, _ := range stat.GFPrefixes {
-			if strings.HasPrefix(gfprefix, k) {
-				find = true
-				gfprefix = k
-			}
-		}
-
-		if !find {
-			gfprefix = getPrefix(meta.Key, 3)
-		}
-
-		if strings.Compare(gfprefix, fprefix) != 0 {
-			stat.FillPrefix(&stat.GFPrefixes, gfprefix, meta)
-		}
-	}
-	/*
-		prefix := getPrefix(meta.Key)
-
-		if stat.Prefixes == nil {
-			stat.Prefixes = make(map[string]Distribution, defaultSize)
-		}
-
-		if _, ok := stat.Prefixes[prefix]; !ok {
-			stat.Prefixes[prefix] = Distribution{}
-		}
-		c := stat.Prefixes[prefix]
-		c.KeyPattern = prefix
-		c.KeyCount += 1
-		c.KeySize += meta.KeySize
-		c.DataSize += meta.DataSize
-		stat.Prefixes[prefix] = c
-	*/
-}
-
-func (stat *KeyStat) FillPrefix(Prefixes *map[string]Distribution, prefix string, meta KeyMeta) {
-	if *Prefixes == nil {
-		*Prefixes = make(map[string]Distribution, defaultSize)
-	}
-
-	if _, ok := (*Prefixes)[prefix]; !ok {
-		(*Prefixes)[prefix] = Distribution{}
-	}
-	c := (*Prefixes)[prefix]
-	c.KeyPattern = prefix
-	c.KeyCount += 1
-	c.KeySize += meta.KeySize
-	c.DataSize += meta.DataSize
-	switch {
-	case meta.Ttl < 0:
-		c.KeyNeverExpire++
-	case meta.Ttl >= 0 && meta.Ttl < Hour:
-		c.ExpireInHour++
-	case meta.Ttl >= Hour && meta.Ttl < Day:
-		c.ExpireInDay++
-	case meta.Ttl >= Day && meta.Ttl < Week:
-		c.ExpireInWeek++
-	case meta.Ttl >= Week:
-		c.ExpireOutWeek++
-	}
-
-	(*Prefixes)[prefix] = c
-}
-
 func (stat *KeyStat) Merge(meta KeyMeta) {
 	stat.MergeMeta(meta)
-	if buildPrefix {
-		stat.MergePrefix(meta)
-	}
 	if buildTree {
 		stat.MergeTree(meta)
+	}
+	if !buildPrefix {
+		return
 	}
 
 	dists := stat.Distribution
@@ -768,7 +655,22 @@ func (stat *KeyStat) Merge(meta KeyMeta) {
 		dists = make(map[string]Distribution, defaultSize)
 	}
 
-	prefix := getPrefix(meta.Key, 1)
+	del := 1
+	if sp := strings.Split(meta.Key, flagSeparator); len(sp) >= 4 {
+		if len(sp) > 5 {
+			del = 2
+		} else {
+			sz := len(sp) - 1
+			pattern := "\\d+" //反斜杠要转义
+			result, _ := regexp.MatchString(pattern, sp[sz-1])
+			if result {
+				del = 2
+			}
+		}
+
+	}
+	prefix := getPrefix(meta.Key, del)
+
 	if v, ok := dists[prefix]; ok {
 		d := Distribution(v)
 		d.MergeMeta(meta)

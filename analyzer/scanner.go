@@ -5,16 +5,16 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/go-redis/redis/v7"
 	"github.com/nullcore1024/rma4go/cmder"
 	log "github.com/sirupsen/logrus"
-	"github.com/winjeg/redis"
 	_ "gopkg.in/cheggaaa/pb.v1"
 	"sync"
 	"time"
 )
 
 const (
-	scanCount   = 512
+	scanCount   = 1024
 	compactSize = 10240
 
 	// cause the real memory used by redis is a little bigger than the content
@@ -23,12 +23,12 @@ const (
 	elementSize = 4
 )
 
-func getTotalKeys(client redis.UniversalClient) int {
+func getTotalKeys(client *redis.Client) int {
 	dbsize, _ := client.DBSize().Result()
 	return int(dbsize)
 }
 
-func Run(clis []redis.UniversalClient, sep string, tree, pre, compact bool) RedisStat {
+func Run(clis []*redis.Client, sep string, tree, pre, compact bool) RedisStat {
 	flagSeparator = sep
 	buildPrefix = pre
 	buildTree = tree
@@ -57,9 +57,10 @@ func Run(clis []redis.UniversalClient, sep string, tree, pre, compact bool) Redi
 	return stat
 }
 
-func PipeDo(clis []redis.UniversalClient, poolSize, dbsize int, recv chan string, sender chan *KeyMeta, ctx context.Context, wg *sync.WaitGroup) {
+func PipeDo(clis []*redis.Client, poolSize, dbsize int, recv chan string, sender chan *KeyMeta, ctx context.Context, wg *sync.WaitGroup) {
 	supportMemUsage := checkSupportMemUsage(clis[0])
 	limiter := make(chan bool, poolSize)
+	defer close(recv)
 
 	i := 0
 	for {
@@ -85,7 +86,7 @@ func PipeDo(clis []redis.UniversalClient, poolSize, dbsize int, recv chan string
 	log.Infof("finish consumer key:%d", i)
 }
 
-func ProducerKey(cli redis.UniversalClient, dbsize int, keyChan chan string, wg *sync.WaitGroup) {
+func ProducerKey(cli *redis.Client, dbsize int, keyChan chan string, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	var (
@@ -123,11 +124,12 @@ func ProducerKey(cli redis.UniversalClient, dbsize int, keyChan chan string, wg 
 			break
 		}
 	}
-	log.Infof("finish current size:%d, err:%s", count, err)
+	log.Infof("finish scan current size:%d", count)
 }
 
 func ConsumerChanMeta(ch chan *KeyMeta, dbsize int, ctx context.Context, cancel func(), stat *RedisStat, wg *sync.WaitGroup) {
 	defer wg.Done()
+	defer close(ch)
 
 	var batch int
 	if (dbsize >> 10) > (1 << 15) {
@@ -145,12 +147,12 @@ func ConsumerChanMeta(ch chan *KeyMeta, dbsize int, ctx context.Context, cancel 
 				stat.Merge(*meta)
 				if batch != 0 && count-prev > batch {
 					prev = count
-					log.Infof("%v, current consumer:%d, key:%s", time.Now().Local(), count, meta.Key)
+					log.Infof("%v, current consumer:%d, key=%s", time.Now().Local(), count, meta.Key)
 				}
 				log.Debugf("type=%s, key=%s, keysz=%d, dataSz=%d", meta.Type, meta.Key, meta.KeySize, meta.DataSize)
 				FreeKeyMeta(meta)
 
-				if count == dbsize {
+				if count >= dbsize {
 					log.Infof("finish consumer:%d", count)
 					cancel()
 					continue
@@ -166,21 +168,21 @@ func ConsumerChanMeta(ch chan *KeyMeta, dbsize int, ctx context.Context, cancel 
 	log.Infof("finish consumer size:%d", count)
 }
 
-func BatchScanKeys(cli redis.UniversalClient, supportMemUsage bool, key string, limiter chan bool, wg *sync.WaitGroup, emit chan *KeyMeta) {
+func BatchScanKeys(cli *redis.Client, supportMemUsage bool, key string, limiter chan bool, wg *sync.WaitGroup, emit chan *KeyMeta) {
 	defer wg.Done()
 	GetKeysMeta(cli, supportMemUsage, key, emit)
 	<-limiter
 	return
 }
 
-func GetKeysMeta(cli redis.UniversalClient, supportMemUsage bool, key string, emit chan *KeyMeta) int {
+func GetKeysMeta(cli *redis.Client, supportMemUsage bool, key string, emit chan *KeyMeta) int {
 	//for i := range keys {
 	meta := GetKeyMeta(cli, supportMemUsage, key)
 	emit <- meta
 	return 0
 }
 
-func GetKeyMeta(cli redis.UniversalClient, supportMemUsage bool, key string) *KeyMeta {
+func GetKeyMeta(cli *redis.Client, supportMemUsage bool, key string) *KeyMeta {
 	meta := NewKeyMeta()
 	meta.Key = key
 	meta.KeySize = int64(len(key))
@@ -237,7 +239,7 @@ func GetKeyMeta(cli redis.UniversalClient, supportMemUsage bool, key string) *Ke
 	return meta
 }
 
-func ScanAllKeys(cli redis.UniversalClient, sep string, tree, pre, compact bool) RedisStat {
+func ScanAllKeys(cli *redis.Client, sep string, tree, pre, compact bool) RedisStat {
 	flagSeparator = sep
 	buildPrefix = pre
 	buildTree = tree
@@ -297,7 +299,7 @@ func ScanAllKeys(cli redis.UniversalClient, sep string, tree, pre, compact bool)
 	return stat
 }
 
-func MergeKeyMeta(cli redis.UniversalClient, supportMemUsage bool, ks []string, stat *RedisStat) {
+func MergeKeyMeta(cli *redis.Client, supportMemUsage bool, ks []string, stat *RedisStat) {
 	for i := range ks {
 		var meta KeyMeta
 		meta.Key = ks[i]
@@ -356,7 +358,7 @@ func MergeKeyMeta(cli redis.UniversalClient, supportMemUsage bool, ks []string, 
 	}
 }
 
-func getListLen(key string, cli redis.UniversalClient) int64 {
+func getListLen(key string, cli *redis.Client) int64 {
 	l, err := cli.LLen(key).Result()
 	if l == 0 || err != nil {
 		return 0
@@ -372,7 +374,7 @@ func getListLen(key string, cli redis.UniversalClient) int64 {
 	return totalLen + baseSize
 }
 
-func getLen(key string, cli redis.UniversalClient, t string) int64 {
+func getLen(key string, cli *redis.Client, t string) int64 {
 	var cursor uint64 = 0
 	var ks []string
 	var totalLen int64
@@ -412,7 +414,7 @@ func getLen(key string, cli redis.UniversalClient, t string) int64 {
 	return totalLen + baseSize
 }
 
-func getLenByMemUsage(cli redis.UniversalClient, key string) int64 {
+func getLenByMemUsage(cli *redis.Client, key string) int64 {
 	len, err := cli.MemoryUsage(key).Result()
 	if err != nil {
 		return 0

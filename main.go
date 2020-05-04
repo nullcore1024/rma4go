@@ -2,9 +2,9 @@ package main
 
 import (
 	"github.com/nullcore1024/rma4go/analyzer"
-	"github.com/nullcore1024/rma4go/client"
 	"github.com/nullcore1024/rma4go/cmder"
-	"github.com/winjeg/redis"
+	//"github.com/winjeg/redis"
+	"github.com/go-redis/redis/v7"
 
 	"flag"
 	// _ "net/http/pprof"
@@ -15,12 +15,11 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
-	"strings"
 	"syscall"
 	"time"
 )
 
-type Client = redis.UniversalClient
+type Client = redis.Client
 
 //write2File write byte array to file
 //logname: prefix of the file's name, which is like logname.20060102-150405, and the file
@@ -134,24 +133,19 @@ func main() {
 }
 
 func printKeyStat() {
-	var clis []Client
+	var clis []*Client
 	pool := cmder.GetThread()
 	for i := 0; i < pool; i++ {
-		var cli Client
-		cluster := cmder.GetCluster()
-		if len(cluster) > 0 {
-			urls := strings.Split(cluster, ",")
-			cli = client.BuildClusterClient(urls, cmder.GetAuth())
-		} else {
-			h := cmder.GetHost()
-			a := cmder.GetAuth()
-			p := cmder.GetPort()
-			cli = client.BuildRedisClient(client.ConnInfo{
-				Host: h,
-				Auth: a,
-				Port: p,
-			}, cmder.GetDb())
-		}
+		h := cmder.GetHost()
+		a := cmder.GetAuth()
+		p := cmder.GetPort()
+		cli := redis.NewClient(&redis.Options{
+			Addr:        fmt.Sprintf("%s:%d", h, p),
+			PoolSize:    128,
+			ReadTimeout: time.Second * 5,
+			Password:    a, // no password set
+			DB:          0, // use default DB
+		})
 		clis = append(clis, cli)
 	}
 	if pool == 1 {

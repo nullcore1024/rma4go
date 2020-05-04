@@ -3,7 +3,8 @@ package analyzer
 import (
 	"errors"
 	"fmt"
-	"github.com/winjeg/redis"
+	"github.com/go-redis/redis/v7"
+
 	"regexp"
 	"strconv"
 	"strings"
@@ -18,7 +19,7 @@ const (
 type redisInfo map[string]map[string]string
 
 // get parsed redis info
-func getRedisMetaInfo(cli redis.UniversalClient) redisInfo {
+func getRedisMetaInfo(cli *redis.Client) redisInfo {
 	infoStr, err := cli.Info().Result()
 	if err != nil {
 		fmt.Println(err.Error())
@@ -55,7 +56,7 @@ func getRedisMetaInfo(cli redis.UniversalClient) redisInfo {
 	return result
 }
 
-func getRedisVersion(cli redis.UniversalClient) string {
+func getRedisVersion(cli *redis.Client) string {
 	info := getRedisMetaInfo(cli)
 	if server, ok := info[serverSection]; ok {
 		if version, ok := server[redisVersion]; ok {
@@ -66,7 +67,7 @@ func getRedisVersion(cli redis.UniversalClient) string {
 }
 
 // check if the redis support 'mem usage' command
-func checkSupportMemUsage(cli redis.UniversalClient) bool {
+func checkSupportMemUsage(cli *redis.Client) bool {
 	version := getRedisVersion(cli)
 	if len(version) < 1 {
 		return false
