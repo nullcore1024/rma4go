@@ -177,7 +177,6 @@ func sortedSlice(Prefixes map[string]Distribution) []Distribution {
 // total stat and distributions
 type KeyStat struct {
 	Distribution map[string]Distribution `json:"distribution"`
-	Prefixes     map[string]Distribution `json:"prefix"`
 	Tree         *DictTree
 	Metrics
 }
@@ -280,25 +279,6 @@ func (stat *RedisStat) PrintTree() {
 	stat.ZSet.printTree("zset.json")
 	stat.Other.printTree("other.json")
 	stat.BigKeys.printTree("bigokey.json")
-}
-
-func (stat *RedisStat) PrintPrefix() {
-	color.Green("\n\nall keys statistics\n\n")
-	stat.All.printPrefixTable()
-	color.Green("\n\nstring keys statistics\n\n")
-	stat.String.printPrefixTable()
-	color.Green("\n\nlist keys statistics\n\n")
-	stat.List.printPrefixTable()
-	color.Green("\n\nhash keys statistics\n\n")
-	stat.Hash.printPrefixTable()
-	color.Green("\n\nset keys statistics\n\n")
-	stat.Set.printPrefixTable()
-	color.Green("\n\nzset keys statistics\n\n")
-	stat.ZSet.printPrefixTable()
-	color.Green("\n\nother keys statistics\n\n")
-	stat.Other.printPrefixTable()
-	color.Green("\n\nbig keys statistics\n\n")
-	stat.BigKeys.printPrefixTable()
 }
 
 func (stat *RedisStat) Print() {
@@ -460,11 +440,11 @@ func (ks *KeyStat) printTree(file string) {
 		node := treeNode{}
 		buildRoot(ks.Tree, &node)
 
-		/*
-			mkdir("./data/")
-			mkdir("./data/" + file)
-			buildDir("./data/"+file, &node)
-		*/
+		fmt.Println("build dir", file)
+
+		mkdir("./data/")
+		mkdir("./data/" + file)
+		buildDir("./data/"+file, &node)
 
 		if dump, err := json.Marshal(node); err == nil {
 			ioutil.WriteFile(file, []byte(dump), 0755)
@@ -480,23 +460,6 @@ func (ks *KeyStat) printTree(file string) {
 			}
 		*/
 	}
-}
-
-func (ks *KeyStat) printPrefixTable() {
-	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{"pattern", "key num", "key size", "data size", "expire in hour", "expire in day",
-		"expire in week", "expire out week", "never expire"})
-	table.SetBorders(tablewriter.Border{Left: true, Top: false, Right: true, Bottom: false})
-	table.SetCenterSeparator("|")
-
-	for _, v := range sortedSlice(ks.Prefixes) {
-		table.Append(v.tableData())
-	}
-	footer := make([]string, 0, metricSize+1)
-	footer = append(footer, "total")
-	footer = append(footer, ks.data()...)
-	table.Append(footer)
-	table.Render()
 }
 
 func (ks *KeyStat) printTable() {

@@ -83,7 +83,7 @@ func PipeDo(clis []*redis.Client, poolSize, dbsize int, recv chan string, sender
 			return
 		}
 	}
-	log.Infof("finish consumer key:%d", i)
+	log.Infof("finish pipe key:%d", i)
 }
 
 func ProducerKey(cli *redis.Client, dbsize int, keyChan chan string, wg *sync.WaitGroup) {
